@@ -1273,6 +1273,11 @@ Status DBImpl::CompactFilesImpl(
     int output_path_id, JobContext* job_context, LogBuffer* log_buffer,
     CompactionJobInfo* compaction_job_info) {
   mutex_.AssertHeld();
+  ROCKS_LOG_INFO(
+      immutable_db_options_.info_log,
+      "[%s] Running CompactFilesImpl, input_level %d; output_devel %d",
+      cfd->GetName().c_str(), compaction_job_info->base_input_level,
+      compaction_job_info->output_level);
 
   if (shutting_down_.load(std::memory_order_acquire)) {
     return Status::ShutdownInProgress();
@@ -2512,6 +2517,8 @@ DBImpl::BGJobLimits DBImpl::GetBGJobLimits(int max_background_flushes,
 
 void DBImpl::AddToCompactionQueue(ColumnFamilyData* cfd) {
   assert(!cfd->queued_for_compaction());
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                 "[%s] adding compaction to queue.\n", cfd->GetName().c_str());
   cfd->Ref();
   compaction_queue_.push_back(cfd);
   cfd->set_queued_for_compaction(true);
@@ -2523,6 +2530,9 @@ ColumnFamilyData* DBImpl::PopFirstFromCompactionQueue() {
   compaction_queue_.pop_front();
   assert(cfd->queued_for_compaction());
   cfd->set_queued_for_compaction(false);
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                 "[%s] popped compaction from queue.\n",
+                 cfd->GetName().c_str());
   return cfd;
 }
 
@@ -2567,6 +2577,22 @@ ColumnFamilyData* DBImpl::PickCompactionFromQueue(
   for (auto iter = throttled_candidates.rbegin();
        iter != throttled_candidates.rend(); ++iter) {
     compaction_queue_.push_front(*iter);
+  }
+  if (cfd) {
+    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                   "[%s] picked compaction from queue.\n",
+                   cfd->GetName().c_str());
+  } else {
+    if (throttled_candidates.empty()) {
+      ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                     "PickCompactionFromQueue returns null because "
+                     "compaction_queue_ is empty.\n");
+    } else {
+      ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                     "PickCompactionFromQueue returns null because all %ld "
+                     "queued compactions where throttled.\n",
+                     throttled_candidates.size());
+    }
   }
   return cfd;
 }
@@ -3008,6 +3034,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
                                     LogBuffer* log_buffer,
                                     PrepickedCompaction* prepicked_compaction,
                                     Env::Priority thread_pri) {
+  ROCKS_LOG_BUFFER(log_buffer, "[JOB %d] Running BackgroundCompaction",
+                   job_context->job_id);
   ManualCompactionState* manual_compaction =
       prepicked_compaction == nullptr
           ? nullptr
@@ -3174,6 +3202,9 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
           ++unscheduled_compactions_;
 
           c.reset();
+          ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                         "[JOB %d] [%s] not enough room for compaction.\n",
+                         job_context->job_id, cfd->GetName().c_str());
           // Don't need to sleep here, because BackgroundCallCompaction
           // will sleep if !s.ok()
           status = Status::CompactionTooLarge();
@@ -3211,7 +3242,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   IOStatus io_s;
   if (!c) {
     // Nothing to do
-    ROCKS_LOG_BUFFER(log_buffer, "Compaction nothing to do");
+    ROCKS_LOG_BUFFER(log_buffer, "[JOB %d] Compaction nothing to do",
+                     job_context->job_id);
   } else if (c->deletion_compaction()) {
     // TODO(icanadi) Do we want to honor snapshots here? i.e. not delete old
     // file if there is alive snapshot pointing to it

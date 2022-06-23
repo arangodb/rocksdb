@@ -476,6 +476,9 @@ CompactionJob::CompactionJob(
   assert(compaction_job_stats_ != nullptr);
   assert(log_buffer_ != nullptr);
   const auto* cfd = compact_->compaction->column_family_data();
+  ROCKS_LOG_BUFFER(log_buffer_, "[%s] [JOB %d] Creating compaction job",
+                   cfd->GetName().c_str(), job_id_);
+
   ThreadStatusUtil::SetColumnFamily(cfd, cfd->ioptions()->env,
                                     db_options_.enable_thread_tracking);
   ThreadStatusUtil::SetThreadOperation(ThreadStatus::OP_COMPACTION);
@@ -483,6 +486,7 @@ CompactionJob::CompactionJob(
 }
 
 CompactionJob::~CompactionJob() {
+  ROCKS_LOG_BUFFER(log_buffer_, "[JOB %d] Destroying compaction job", job_id_);
   assert(compact_ == nullptr);
   ThreadStatusUtil::ResetThreadStatus();
 }
@@ -675,10 +679,9 @@ void CompactionJob::GenSubcompactionBoundaries() {
           *(c->mutable_cf_options()), out_lvl,
           c->immutable_options()->compaction_style, base_level,
           c->immutable_options()->level_compaction_dynamic_level_bytes)));
-  uint64_t subcompactions =
-      std::min({static_cast<uint64_t>(ranges.size()),
-                static_cast<uint64_t>(c->max_subcompactions()),
-                max_output_files});
+  uint64_t subcompactions = std::min(
+      {static_cast<uint64_t>(ranges.size()),
+       static_cast<uint64_t>(c->max_subcompactions()), max_output_files});
 
   if (subcompactions > 1) {
     double mean = sum * 1.0 / subcompactions;
@@ -808,11 +811,12 @@ Status CompactionJob::Run() {
           break;
         }
         // Verify that the table is usable
-        // We set for_compaction to false and don't OptimizeForCompactionTableRead
-        // here because this is a special case after we finish the table building
-        // No matter whether use_direct_io_for_flush_and_compaction is true,
-        // we will regard this verification as user reads since the goal is
-        // to cache it here for further user reads
+        // We set for_compaction to false and don't
+        // OptimizeForCompactionTableRead here because this is a special case
+        // after we finish the table building No matter whether
+        // use_direct_io_for_flush_and_compaction is true, we will regard this
+        // verification as user reads since the goal is to cache it here for
+        // further user reads
         ReadOptions read_options;
         InternalIterator* iter = cfd->table_cache()->NewIterator(
             read_options, file_options_, cfd->internal_comparator(),
@@ -858,8 +862,8 @@ Status CompactionJob::Run() {
       }
     };
     for (size_t i = 1; i < compact_->sub_compact_states.size(); i++) {
-      thread_pool.emplace_back(verify_table,
-                               std::ref(compact_->sub_compact_states[i].status));
+      thread_pool.emplace_back(
+          verify_table, std::ref(compact_->sub_compact_states[i].status));
     }
     verify_table(compact_->sub_compact_states[0].status);
     for (auto& thread : thread_pool) {
@@ -906,6 +910,8 @@ Status CompactionJob::Install(const MutableCFOptions& mutable_cf_options) {
 
   ColumnFamilyData* cfd = compact_->compaction->column_family_data();
   assert(cfd);
+  ROCKS_LOG_BUFFER(log_buffer_, "[%s] [JOB %d] Installing compaction job",
+                   cfd->GetName().c_str(), job_id_);
 
   cfd->internal_stats()->AddCompactionStats(
       compact_->compaction->output_level(), thread_pri_, compaction_stats_);
@@ -951,12 +957,12 @@ Status CompactionJob::Install(const MutableCFOptions& mutable_cf_options) {
 
   ROCKS_LOG_BUFFER(
       log_buffer_,
-      "[%s] compacted to: %s, MB/sec: %.1f rd, %.1f wr, level %d, "
+      "[%s] [JOB %d] compacted to: %s, MB/sec: %.1f rd, %.1f wr, level %d, "
       "files in(%d, %d) out(%d +%d blob) "
       "MB in(%.1f, %.1f +%.1f blob) out(%.1f +%.1f blob), "
       "read-write-amplify(%.1f) write-amplify(%.1f) %s, records in: %" PRIu64
       ", records dropped: %" PRIu64 " output_compression: %s\n",
-      column_family_name.c_str(), vstorage->LevelSummary(&tmp),
+      column_family_name.c_str(), job_id_, vstorage->LevelSummary(&tmp),
       bytes_read_per_sec, bytes_written_per_sec,
       compact_->compaction->output_level(),
       stats.num_input_files_in_non_output_levels,
@@ -1841,9 +1847,8 @@ Status CompactionJob::FinishCompactionOutputFile(
     // bound. If the end of subcompaction is null or the upper bound is null,
     // it means that this file is the last file in the compaction. So there
     // will be no overlapping between this file and others.
-    assert(sub_compact->end == nullptr ||
-           upper_bound == nullptr ||
-           ucmp->Compare(*upper_bound , *sub_compact->end) <= 0);
+    assert(sub_compact->end == nullptr || upper_bound == nullptr ||
+           ucmp->Compare(*upper_bound, *sub_compact->end) <= 0);
     auto it = range_del_agg->NewIterator(lower_bound, upper_bound,
                                          has_overlapping_endpoints);
     // Position the range tombstone output iterator. There may be tombstone

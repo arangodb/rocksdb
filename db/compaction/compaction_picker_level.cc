@@ -7,12 +7,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include "db/compaction/compaction_picker_level.h"
+
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "db/compaction/compaction_picker_level.h"
 #include "logging/log_buffer.h"
+#include "logging/logging.h"
 #include "test_util/sync_point.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -310,6 +312,10 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   // to a clean cut.
   SetupInitialFiles();
   if (start_level_inputs_.empty()) {
+    ROCKS_LOG_BUFFER(log_buffer_,
+                     "[%s] CompactionPicker returns null because "
+                     "start_level_inputs_ is empty",
+                     cf_name_.c_str());
     return nullptr;
   }
   assert(start_level_ >= 0 && output_level_ >= 0);
@@ -317,12 +323,20 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   // If it is a L0 -> base level compaction, we need to set up other L0
   // files if needed.
   if (!SetupOtherL0FilesIfNeeded()) {
+    ROCKS_LOG_BUFFER(log_buffer_,
+                     "[%s] CompactionPicker returns null because "
+                     "SetupOtherL0FilesIfNeeded returned false",
+                     cf_name_.c_str());
     return nullptr;
   }
 
   // Pick files in the output level and expand more files in the start level
   // if needed.
   if (!SetupOtherInputsIfNeeded()) {
+    ROCKS_LOG_BUFFER(log_buffer_,
+                     "[%s] CompactionPicker returns null because "
+                     "SetupOtherInputsIfNeeded returned false",
+                     cf_name_.c_str());
     return nullptr;
   }
 
@@ -330,6 +344,11 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   Compaction* c = GetCompaction();
 
   TEST_SYNC_POINT_CALLBACK("LevelCompactionPicker::PickCompaction:Return", c);
+
+  ROCKS_LOG_BUFFER(log_buffer_,
+                   "[%s] CompactionPicker created compaction - Base level %d; "
+                   "output level %d",
+                   cf_name_.c_str(), c->start_level(), c->output_level());
 
   return c;
 }
