@@ -2704,6 +2704,9 @@ uint32_t GetExpiredTtlFilesCount(const ImmutableOptions& ioptions,
 void VersionStorageInfo::ComputeCompactionScore(
     const ImmutableOptions& immutable_options,
     const MutableCFOptions& mutable_cf_options) {
+  ROCKS_LOG_INFO(immutable_options.info_log,
+                 "ComputeCompactionScore base level %d; levels %d", base_level_,
+                 MaxInputLevel());
   for (int level = 0; level <= MaxInputLevel(); level++) {
     double score;
     if (level == 0) {
