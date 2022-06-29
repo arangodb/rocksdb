@@ -2640,9 +2640,23 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
 
 void DBImpl::SchedulePendingCompaction(ColumnFamilyData* cfd) {
   mutex_.AssertHeld();
-  if (!cfd->queued_for_compaction() && cfd->NeedsCompaction()) {
-    AddToCompactionQueue(cfd);
-    ++unscheduled_compactions_;
+  if (!cfd->queued_for_compaction()) {
+    if (cfd->NeedsCompaction()) {
+      AddToCompactionQueue(cfd);
+      ++unscheduled_compactions_;
+    } else {
+      ROCKS_LOG_INFO(
+          immutable_db_options_.info_log,
+          "[%s] No compaction scheduled because NeedsCompaction() returned "
+          "false",
+          cfd->GetName().c_str());
+    }
+  } else {
+    ROCKS_LOG_INFO(
+        immutable_db_options_.info_log,
+        "[%s] No compaction scheduled because queued_for_compaction() returned "
+        "true",
+        cfd->GetName().c_str());
   }
 }
 
