@@ -3854,6 +3854,10 @@ Status DBImpl::DeleteFilesInRanges(ColumnFamilyHandle* column_family,
           deleted_files.insert(level_file);
           level_file->being_compacted = true;
         }
+        ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                       "Calling ComputeCompactionScore from DeleteFilesImpl. "
+                       "Version %ld storage %p",
+                       input_version->GetVersionNumber(), (void*)vstorage);
         vstorage->ComputeCompactionScore(*cfd->ioptions(),
                                          *cfd->GetLatestMutableCFOptions());
       }

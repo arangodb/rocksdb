@@ -642,6 +642,10 @@ Compaction* CompactionPicker::CompactRange(
         Temperature::kUnknown, compact_range_options.max_subcompactions,
         /* grandparents */ {}, /* is manual */ true, trim_ts);
     RegisterCompaction(c);
+    ROCKS_LOG_INFO(ioptions_.info_log,
+                   "Calling ComputeCompactionScore from "
+                   "CompactionPicker::CompactRange1. storage %p",
+                   (void*)vstorage);
     vstorage->ComputeCompactionScore(ioptions_, mutable_cf_options);
     return c;
   }
@@ -824,6 +828,10 @@ Compaction* CompactionPicker::CompactRange(
   TEST_SYNC_POINT_CALLBACK("CompactionPicker::CompactRange:Return", compaction);
   RegisterCompaction(compaction);
 
+  ROCKS_LOG_INFO(ioptions_.info_log,
+                 "Calling ComputeCompactionScore from "
+                 "CompactionPicker::CompactRange2. storage %p",
+                 (void*)vstorage);
   // Creating a compaction influences the compaction score because the score
   // takes running compactions into account (by skipping files that are already
   // being compacted). Since we just changed compaction score, we recalculate it

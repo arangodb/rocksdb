@@ -16,6 +16,7 @@
 #include <list>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -2665,6 +2666,8 @@ void VersionStorageInfo::EstimateCompactionBytesNeeded(
       }
       if (bytes_next_level > 0) {
         assert(level_size > 0);
+        // bytes_compact_to_next_level * (bytes_next_level / level_size + 1);
+
         auto pending = static_cast<uint64_t>(
             static_cast<double>(bytes_compact_to_next_level) *
             (static_cast<double>(bytes_next_level) /
@@ -2705,8 +2708,11 @@ void VersionStorageInfo::ComputeCompactionScore(
     const ImmutableOptions& immutable_options,
     const MutableCFOptions& mutable_cf_options) {
   ROCKS_LOG_INFO(immutable_options.info_log,
-                 "ComputeCompactionScore base level %d; levels %d", base_level_,
-                 MaxInputLevel());
+                 "ComputeCompactionScore base level %d; levels %d; this %p",
+                 base_level_, MaxInputLevel(), (void*)this);
+
+  std::ostringstream debug_info;
+  debug_info << "Ignoring pending files ";
   for (int level = 0; level <= MaxInputLevel(); level++) {
     double score;
     if (level == 0) {
@@ -2727,6 +2733,8 @@ void VersionStorageInfo::ComputeCompactionScore(
         if (!f->being_compacted) {
           total_size += f->compensated_file_size;
           num_sorted_runs++;
+        } else {
+          debug_info << " " << f->fd.GetNumber() << '@' << level;
         }
       }
       if (compaction_style_ == kCompactionStyleUniversal) {
@@ -2795,6 +2803,8 @@ void VersionStorageInfo::ComputeCompactionScore(
       for (auto f : files_[level]) {
         if (!f->being_compacted) {
           level_bytes_no_compacting += f->compensated_file_size;
+        } else {
+          debug_info << " " << f->fd.GetNumber() << '@' << level;
         }
       }
       score = static_cast<double>(level_bytes_no_compacting) /
@@ -2838,6 +2848,34 @@ void VersionStorageInfo::ComputeCompactionScore(
 
   EstimateCompactionBytesNeeded(mutable_cf_options);
 
+  debug_info << '\n';
+  for (int i = 0; i < num_levels_; i++) {
+    debug_info << "level" << i << ": "
+               << estimated_compaction_needed_bytes_level_[i] << " / "
+               << MaxBytesForLevel(i) << "bytes";
+    if (i < num_levels_ - 1) {
+      debug_info << "; ";
+    }
+  }
+  debug_info << '\n';
+  for (int i = 0; i < num_levels_; i++) {
+    debug_info << "level" << compaction_level_[i] << " score "
+               << compaction_score_[i];
+    if (i < num_levels_ - 1) {
+      debug_info << "; ";
+    }
+  }
+  for (int i = 0; i < num_levels_; i++) {
+    debug_info << "\nlevel " << i;
+    uint64_t total = 0;
+    for (auto* f : files_[i]) {
+      total += f->fd.GetFileSize();
+      debug_info << ' ' << f->fd.GetNumber() << '('
+                 << f->fd.GetFileSize() / (1024 * 1024) << "MB)";
+    }
+    debug_info << " TOTAL " << total;
+  }
+
   if (estimated_compaction_needed_bytes_ > 0) {
     if (ExpiredTtlFiles().empty() &&
         FilesMarkedForPeriodicCompaction().empty() &&
@@ -2846,23 +2884,23 @@ void VersionStorageInfo::ComputeCompactionScore(
         FilesMarkedForForcedBlobGC().empty() &&
         std::all_of(compaction_score_.begin(), compaction_score_.end(),
                     [](auto v) { return v < 1; })) {
-      char scratch[2000];
-      int len = 0;
-      for (int i = 0; i < num_levels_ - 1; i++) {
-        len += snprintf(scratch + len, sizeof(scratch) - len,
-                        "; level%d: %ld bytes", i,
-                        estimated_compaction_needed_bytes_level_[i]);
-      }
-      for (int i = 0; i < num_levels_ - 1; i++) {
-        len +=
-            snprintf(scratch + len, sizeof(scratch) - len, "; level%d score %f",
-                     compaction_level_[i], compaction_score_[i]);
-      }
       ROCKS_LOG_WARN(immutable_options.info_log,
                      "Estimated %ld pending compaction bytes, but everything "
-                     "is empty!! %s",
-                     estimated_compaction_needed_bytes_, scratch);
+                     "is empty!! finalized %d; this %p %s",
+                     estimated_compaction_needed_bytes_, (int)finalized_,
+                     (void*)this, debug_info.str().c_str());
+    } else {
+      ROCKS_LOG_INFO(immutable_options.info_log,
+                     "Computed Compaction Scores finalized %d with %ld pending "
+                     "compaction bytes; this %p %s",
+                     (int)finalized_, estimated_compaction_needed_bytes_,
+                     (void*)this, debug_info.str().c_str());
     }
+  } else {
+    ROCKS_LOG_INFO(immutable_options.info_log,
+                   "Computed Compaction Scores finalized %d - no pending "
+                   "compaction byes; this %p %s",
+                   (int)finalized_, (void*)this, debug_info.str().c_str());
   }
 }
 
@@ -4186,6 +4224,11 @@ void VersionSet::Reset() {
 
 void VersionSet::AppendVersion(ColumnFamilyData* column_family_data,
                                Version* v) {
+  ROCKS_LOG_INFO(column_family_data->ioptions()->info_log,
+                 "Calling ComputeCompactionScore from AppendVersion for "
+                 "Version %ld (current version %ld) storage %p",
+                 v->GetVersionNumber(), current_version_number_,
+                 (void*)v->storage_info());
   // compute new compaction score
   v->storage_info()->ComputeCompactionScore(
       *column_family_data->ioptions(),

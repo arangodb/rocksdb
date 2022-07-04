@@ -308,6 +308,17 @@ bool LevelCompactionBuilder::SetupOtherInputsIfNeeded() {
 }
 
 Compaction* LevelCompactionBuilder::PickCompaction() {
+  char scratch[2000];
+  int len = 0;
+  for (int i = 0; i < compaction_picker_->NumberLevels(); i++) {
+    auto score = vstorage_->CompactionScore(i);
+    auto level = vstorage_->CompactionScoreLevel(i);
+
+    len += snprintf(scratch + len, sizeof(scratch) - len, " - l%d; s%f", level,
+                    score);
+    len = std::min(len, static_cast<int>(sizeof(scratch)));
+  }
+
   // Pick up the first file to start compaction. It may have been extended
   // to a clean cut.
   SetupInitialFiles();
@@ -345,10 +356,12 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
 
   TEST_SYNC_POINT_CALLBACK("LevelCompactionPicker::PickCompaction:Return", c);
 
+  Compaction::InputLevelSummaryBuffer inputs_summary;
   ROCKS_LOG_BUFFER(log_buffer_,
                    "[%s] CompactionPicker created compaction - Base level %d; "
-                   "output level %d",
-                   cf_name_.c_str(), c->start_level(), c->output_level());
+                   "output level %d; score %f; %s; storage %s",
+                   cf_name_.c_str(), c->start_level(), c->output_level(),
+                   c->score(), c->InputLevelSummary(&inputs_summary), scratch);
 
   return c;
 }
@@ -378,6 +391,10 @@ Compaction* LevelCompactionBuilder::GetCompaction() {
   // takes running compactions into account (by skipping files that are already
   // being compacted). Since we just changed compaction score, we recalculate it
   // here
+  ROCKS_LOG_INFO(ioptions_.info_log,
+                 "Calling ComputeCompactionScore from "
+                 "LevelCompactionBuilder::GetCompaction. storage %p",
+                 (void*)vstorage_);
   vstorage_->ComputeCompactionScore(ioptions_, mutable_cf_options_);
   return c;
 }

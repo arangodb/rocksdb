@@ -1380,6 +1380,11 @@ Status DBImpl::CompactFilesImpl(
       c->column_family_data()->GetFullHistoryTsLow(), c->trim_ts(),
       &blob_callback_);
 
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                 "Calling ComputeCompactionScore from CompactFilesImpl. "
+                 "Version %ld storage %p",
+                 c->column_family_data()->current()->GetVersionNumber(),
+                 (void*)version->storage_info());
   // Creating a compaction influences the compaction score because the score
   // takes running compactions into account (by skipping files that are already
   // being compacted). Since we just changed compaction score, we recalculate it
@@ -3207,6 +3212,14 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         if (!enough_room) {
           // Then don't do the compaction
           c->ReleaseCompactionFiles(status);
+          ROCKS_LOG_INFO(
+              immutable_db_options_.info_log,
+              "Calling ComputeCompactionScore from BackgroundCompaction "
+              "because there is not enough room. "
+              "Version %ld storage %p",
+              c->column_family_data()->current()->GetVersionNumber(),
+              (void*)c->column_family_data()->current()->storage_info());
+
           c->column_family_data()
               ->current()
               ->storage_info()
@@ -3488,6 +3501,12 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
       // time
       auto cfd = c->column_family_data();
       assert(cfd != nullptr);
+      ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                     "Calling ComputeCompactionScore from BackgroundCompaction "
+                     "because there was a compaction error. "
+                     "Version %ld storage %p",
+                     c->column_family_data()->current()->GetVersionNumber(),
+                     (void*)c->column_family_data()->current()->storage_info());
       // Since this compaction failed, we need to recompute the score so it
       // takes the original input files into account
       c->column_family_data()
