@@ -918,6 +918,9 @@ Status CompactionJob::Install(const MutableCFOptions& mutable_cf_options) {
 
   if (status.ok()) {
     status = InstallCompactionResults(mutable_cf_options);
+    ROCKS_LOG_BUFFER(
+        log_buffer_, "[%s] [JOB %d] InstallCompactionResults finished with %s",
+        cfd->GetName().c_str(), job_id_, status.ToString().c_str());
   }
   if (!versions_->io_status().ok()) {
     io_status_ = versions_->io_status();
@@ -2164,6 +2167,8 @@ Status CompactionJob::InstallCompactionResults(
                              stats.GetBytes());
   }
 
+  ROCKS_LOG_INFO(db_options_.info_log, "[%s] [JOB %d] Calling LogAndApply",
+                 compaction->column_family_data()->GetName().c_str(), job_id_);
   return versions_->LogAndApply(compaction->column_family_data(),
                                 mutable_cf_options, edit, db_mutex_,
                                 db_directory_);

@@ -1089,7 +1089,16 @@ void CompactionPicker::RegisterCompaction(Compaction* c) {
       ioptions_.compaction_style == kCompactionStyleUniversal) {
     level0_compactions_in_progress_.insert(c);
   }
+  auto* cfd = c->column_family_data();
+  const char* name = cfd ? cfd->GetName().c_str() : "<unknown>";
+  uint64_t version = cfd ? cfd->current()->GetVersionNumber() : (uint64_t)-1;
   compactions_in_progress_.insert(c);
+  ROCKS_LOG_INFO(
+      ioptions_.logger,
+      "[%s] Register compaction %p; input version %p; input level "
+      "%d, output level %d, current version %ld; compactions in progress %ld",
+      name, (void*)c, (void*)c->input_vstorage_, c->start_level_,
+      c->output_level_, version, compactions_in_progress_.size());
   TEST_SYNC_POINT_CALLBACK("CompactionPicker::RegisterCompaction:Registered",
                            c);
 }
@@ -1103,6 +1112,16 @@ void CompactionPicker::UnregisterCompaction(Compaction* c) {
     level0_compactions_in_progress_.erase(c);
   }
   compactions_in_progress_.erase(c);
+  auto* cfd = c->column_family_data();
+  const char* name = cfd ? cfd->GetName().c_str() : "<unknown>";
+  uint64_t version = cfd ? cfd->current()->GetVersionNumber() : (uint64_t)-1;
+  compactions_in_progress_.insert(c);
+  ROCKS_LOG_INFO(
+      ioptions_.logger,
+      "[%s] Unregister compaction %p; input version %p; input level "
+      "%d, output level %d, current version %ld; compactions in progress %ld",
+      name, (void*)c, (void*)c->input_vstorage_, c->start_level_,
+      c->output_level_, version, compactions_in_progress_.size());
 }
 
 void CompactionPicker::PickFilesMarkedForCompaction(

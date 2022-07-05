@@ -308,15 +308,21 @@ bool LevelCompactionBuilder::SetupOtherInputsIfNeeded() {
 }
 
 Compaction* LevelCompactionBuilder::PickCompaction() {
-  char scratch[2000];
-  int len = 0;
+  std::ostringstream debug_log;
+  debug_log << "storage " << (void*)vstorage_;
+  debug_log << "\nRunning compactions: ";
+  for (auto& c : *compaction_picker_->compactions_in_progress()) {
+    debug_log << "\n    [" << c->column_family_data()->GetName()
+              << "] compaction " << (void*)c << "; input version "
+              << (void*)c->input_vstorage_ << "; input level "
+              << c->start_level_ << ", output level " << c->output_level_;
+  }
+  debug_log << "\nInput scores";
   for (int i = 0; i < compaction_picker_->NumberLevels(); i++) {
     auto score = vstorage_->CompactionScore(i);
     auto level = vstorage_->CompactionScoreLevel(i);
 
-    len += snprintf(scratch + len, sizeof(scratch) - len, " - l%d; s%f", level,
-                    score);
-    len = std::min(len, static_cast<int>(sizeof(scratch)));
+    debug_log << " - l" << level << "; s" << score;
   }
 
   // Pick up the first file to start compaction. It may have been extended
@@ -325,8 +331,8 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   if (start_level_inputs_.empty()) {
     ROCKS_LOG_BUFFER(log_buffer_,
                      "[%s] CompactionPicker returns null because "
-                     "start_level_inputs_ is empty",
-                     cf_name_.c_str());
+                     "start_level_inputs_ is empty\n%s",
+                     cf_name_.c_str(), debug_log.str().c_str());
     return nullptr;
   }
   assert(start_level_ >= 0 && output_level_ >= 0);
@@ -336,8 +342,8 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   if (!SetupOtherL0FilesIfNeeded()) {
     ROCKS_LOG_BUFFER(log_buffer_,
                      "[%s] CompactionPicker returns null because "
-                     "SetupOtherL0FilesIfNeeded returned false",
-                     cf_name_.c_str());
+                     "SetupOtherL0FilesIfNeeded returned false\n%s",
+                     cf_name_.c_str(), debug_log.str().c_str());
     return nullptr;
   }
 
@@ -346,8 +352,8 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   if (!SetupOtherInputsIfNeeded()) {
     ROCKS_LOG_BUFFER(log_buffer_,
                      "[%s] CompactionPicker returns null because "
-                     "SetupOtherInputsIfNeeded returned false",
-                     cf_name_.c_str());
+                     "SetupOtherInputsIfNeeded returned false\n%s",
+                     cf_name_.c_str(), debug_log.str().c_str());
     return nullptr;
   }
 
@@ -361,7 +367,8 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
                    "[%s] CompactionPicker created compaction - Base level %d; "
                    "output level %d; score %f; %s; storage %s",
                    cf_name_.c_str(), c->start_level(), c->output_level(),
-                   c->score(), c->InputLevelSummary(&inputs_summary), scratch);
+                   c->score(), c->InputLevelSummary(&inputs_summary),
+                   debug_log.str().c_str());
 
   return c;
 }

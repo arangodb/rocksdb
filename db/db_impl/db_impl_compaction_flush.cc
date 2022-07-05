@@ -3257,6 +3257,10 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
           // it to the queue and schedule a new thread.
           if (cfd->NeedsCompaction()) {
             // Yes, we need more compactions!
+            ROCKS_LOG_INFO(cfd->ioptions()->info_log,
+                           "[JOB %d] BackgroundCompaction schedules yet "
+                           "another compaction for [%s]",
+                           job_context->job_id, cfd->GetName().c_str());
             AddToCompactionQueue(cfd);
             ++unscheduled_compactions_;
             MaybeScheduleFlushOrCompaction();
@@ -3430,6 +3434,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         c->trim_ts(), &blob_callback_);
     compaction_job.Prepare();
 
+    ROCKS_LOG_BUFFER(log_buffer, "[JOB %d] Calling NotifyOnCompactionBegin",
+                     job_context->job_id);
     NotifyOnCompactionBegin(c->column_family_data(), c.get(), status,
                             compaction_job_stats, job_context->job_id);
     mutex_.Unlock();
@@ -3459,6 +3465,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   }
 
   if (c != nullptr) {
+    ROCKS_LOG_BUFFER(log_buffer, "[JOB %d] Calling ReleaseCompactionFiles",
+                     job_context->job_id);
     c->ReleaseCompactionFiles(status);
     *made_progress = true;
 
@@ -3471,6 +3479,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     }
 #endif  // ROCKSDB_LITE
 
+    ROCKS_LOG_BUFFER(log_buffer, "[JOB %d] Calling NotifyOnCompactionCompleted",
+                     job_context->job_id);
     NotifyOnCompactionCompleted(c->column_family_data(), c.get(), status,
                                 compaction_job_stats, job_context->job_id);
   }
@@ -3559,6 +3569,9 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     }
     m->in_progress = false;  // not being processed anymore
   }
+
+  ROCKS_LOG_BUFFER(log_buffer, "[JOB %d] BackgroundCompaction finished",
+                   job_context->job_id);
   TEST_SYNC_POINT("DBImpl::BackgroundCompaction:Finish");
   return status;
 }
@@ -3770,6 +3783,9 @@ void DBImpl::InstallSuperVersionAndScheduleWork(
         my_cfd->current()->storage_info()->bottommost_files_mark_threshold());
   }
 
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                 "About to schedule pending compaction after new super version "
+                 "has been installed");
   // Whenever we install new SuperVersion, we might need to issue new flushes or
   // compactions.
   SchedulePendingCompaction(cfd);

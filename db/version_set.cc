@@ -1779,7 +1779,13 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
       max_file_size_for_l0_meta_pin_(
           MaxFileSizeForL0MetaPin(mutable_cf_options_)),
       version_number_(version_number),
-      io_tracer_(io_tracer) {}
+      io_tracer_(io_tracer) {
+  if (cfd_) {
+    ROCKS_LOG_INFO(
+        cfd_->ioptions()->info_log, "[%s] Created new version %ld; storage %p",
+        cfd_->GetName().c_str(), version_number_, (void*)&storage_info_);
+  }
+}
 
 Status Version::GetBlob(const ReadOptions& read_options, const Slice& user_key,
                         const Slice& blob_index_slice,
@@ -4263,6 +4269,12 @@ Status VersionSet::ProcessManifestWrites(
   assert(!writers.empty());
   ManifestWriter& first_writer = writers.front();
   ManifestWriter* last_writer = &first_writer;
+  if (last_writer->cfd) {
+    ROCKS_LOG_INFO(
+        last_writer->cfd->ioptions()->info_log,
+        "[%s] VersionSet::ProcessManifestWrites; manifest_writers size %ld",
+        last_writer->cfd->GetName().c_str(), manifest_writers_.size());
+  }
 
   assert(!manifest_writers_.empty());
   assert(manifest_writers_.front() == &first_writer);
@@ -4681,7 +4693,10 @@ Status VersionSet::ProcessManifestWrites(
       if (last_min_log_number_to_keep != 0) {
         MarkMinLogNumberToKeep(last_min_log_number_to_keep);
       }
-
+      if (first_writer.cfd) {
+        ROCKS_LOG_INFO(first_writer.cfd->ioptions()->info_log,
+                       "Appending %ld versions", versions.size());
+      }
       for (int i = 0; i < static_cast<int>(versions.size()); ++i) {
         ColumnFamilyData* cfd = versions[i]->cfd_;
         AppendVersion(cfd, versions[i]);
