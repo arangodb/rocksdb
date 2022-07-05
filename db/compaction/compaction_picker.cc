@@ -1089,10 +1089,10 @@ void CompactionPicker::RegisterCompaction(Compaction* c) {
       ioptions_.compaction_style == kCompactionStyleUniversal) {
     level0_compactions_in_progress_.insert(c);
   }
+  compactions_in_progress_.insert(c);
   auto* cfd = c->column_family_data();
   const char* name = cfd ? cfd->GetName().c_str() : "<unknown>";
   uint64_t version = cfd ? cfd->current()->GetVersionNumber() : (uint64_t)-1;
-  compactions_in_progress_.insert(c);
   ROCKS_LOG_INFO(
       ioptions_.logger,
       "[%s] Register compaction %p; input version %p; input level "
@@ -1115,7 +1115,6 @@ void CompactionPicker::UnregisterCompaction(Compaction* c) {
   auto* cfd = c->column_family_data();
   const char* name = cfd ? cfd->GetName().c_str() : "<unknown>";
   uint64_t version = cfd ? cfd->current()->GetVersionNumber() : (uint64_t)-1;
-  compactions_in_progress_.insert(c);
   ROCKS_LOG_INFO(
       ioptions_.logger,
       "[%s] Unregister compaction %p; input version %p; input level "
