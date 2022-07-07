@@ -540,16 +540,13 @@ bool LevelCompactionBuilder::PickFileToCompact() {
     vstorage_->GetOverlappingInputs(output_level_, &smallest, &largest,
                                     &output_level_inputs.files);
 
-    auto outLevelEmpty = output_level_inputs.empty();
-    auto outExpandInputsToCleanCut = compaction_picker_->ExpandInputsToCleanCut(
-        cf_name_, vstorage_, &output_level_inputs);
-    if (!outLevelEmpty && !outExpandInputsToCleanCut) {
-      ROCKS_LOG_BUFFER(
-          log_buffer_,
-          "[%s] CompactionPicker cannot pick %d; output_level_inputs.empty %d "
-          "filesRangeOverlapWithCompaction %d",
-          cf_name_.c_str(), f->fd.GetNumber(), outLevelEmpty,
-          outExpandInputsToCleanCut);
+    if (!output_level_inputs.empty() &&
+        !compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
+                                                    &output_level_inputs)) {
+      ROCKS_LOG_BUFFER(log_buffer_,
+                       "[%s] CompactionPicker cannot pick %d because we cannot "
+                       "expand outputLevelInputs to clean cut",
+                       cf_name_.c_str(), f->fd.GetNumber());
       start_level_inputs_.clear();
       continue;
     }
