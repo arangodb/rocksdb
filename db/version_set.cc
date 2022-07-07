@@ -4393,6 +4393,12 @@ Status VersionSet::ProcessManifestWrites(
         batch_edits.push_back(e);
       }
     }
+
+    if (first_writer.cfd) {
+      ROCKS_LOG_INFO(first_writer.cfd->ioptions()->info_log,
+                     "[%s] Building %ld versions",
+                     first_writer.cfd->GetName().c_str(), versions.size());
+    }
     for (int i = 0; i < static_cast<int>(versions.size()); ++i) {
       assert(!builder_guards.empty() &&
              builder_guards.size() == versions.size());
@@ -4885,6 +4891,10 @@ Status VersionSet::LogAndApply(
     }
     TEST_SYNC_POINT_CALLBACK("VersionSet::LogAndApply:WakeUpAndDone", mu);
 #endif /* !NDEBUG */
+    ROCKS_LOG_INFO(
+        first_writer.cfd->ioptions()->info_log,
+        "[%s] Returning early from LogAndApply because first_writer is done",
+        first_writer.cfd->GetName().c_str());
     return first_writer.status;
   }
 

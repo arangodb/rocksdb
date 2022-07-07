@@ -317,12 +317,25 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
               << (void*)c->input_vstorage_ << "; input level "
               << c->start_level_ << ", output level " << c->output_level_;
   }
+  debug_log << "\nRunning L0 compactions: ";
+  for (auto& c : *compaction_picker_->level0_compactions_in_progress()) {
+    debug_log << "\n    [" << c->column_family_data()->GetName()
+              << "] compaction " << (void*)c << "; input version "
+              << (void*)c->input_vstorage_ << "; input level "
+              << c->start_level_ << ", output level " << c->output_level_;
+  }
   debug_log << "\nInput scores";
   for (int i = 0; i < compaction_picker_->NumberLevels(); i++) {
     auto score = vstorage_->CompactionScore(i);
     auto level = vstorage_->CompactionScoreLevel(i);
 
     debug_log << " - l" << level << "; s" << score;
+  }
+  debug_log << "\nFiles still being compacted";
+  for (int i = 0; i < compaction_picker_->NumberLevels(); i++) {
+    for (auto& f : vstorage_->LevelFiles(i)) {
+      debug_log << ' ' << f->fd.GetNumber();
+    }
   }
 
   // Pick up the first file to start compaction. It may have been extended
@@ -496,10 +509,18 @@ bool LevelCompactionBuilder::PickFileToCompact() {
 
     start_level_inputs_.files.push_back(f);
     start_level_inputs_.level = start_level_;
-    if (!compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
-                                                    &start_level_inputs_) ||
+    auto expandInputsToCleanCut = compaction_picker_->ExpandInputsToCleanCut(
+        cf_name_, vstorage_, &start_level_inputs_);
+    auto filesRangeOverlapWithCompaction =
         compaction_picker_->FilesRangeOverlapWithCompaction(
-            {start_level_inputs_}, output_level_)) {
+            {start_level_inputs_}, output_level_);
+    if (!expandInputsToCleanCut || filesRangeOverlapWithCompaction) {
+      ROCKS_LOG_BUFFER(
+          log_buffer_,
+          "[%s] CompactionPicker cannot pick %d; expandInputsToCleanCut %d "
+          "filesRangeOverlapWithCompaction %d",
+          cf_name_.c_str(), f->fd.GetNumber(), expandInputsToCleanCut,
+          filesRangeOverlapWithCompaction);
       // A locked (pending compaction) input-level file was pulled in due to
       // user-key overlap.
       start_level_inputs_.clear();
@@ -518,9 +539,17 @@ bool LevelCompactionBuilder::PickFileToCompact() {
     output_level_inputs.level = output_level_;
     vstorage_->GetOverlappingInputs(output_level_, &smallest, &largest,
                                     &output_level_inputs.files);
-    if (!output_level_inputs.empty() &&
-        !compaction_picker_->ExpandInputsToCleanCut(cf_name_, vstorage_,
-                                                    &output_level_inputs)) {
+
+    auto outLevelEmpty = output_level_inputs.empty();
+    auto outExpandInputsToCleanCut = compaction_picker_->ExpandInputsToCleanCut(
+        cf_name_, vstorage_, &output_level_inputs);
+    if (!outLevelEmpty && !outExpandInputsToCleanCut) {
+      ROCKS_LOG_BUFFER(
+          log_buffer_,
+          "[%s] CompactionPicker cannot pick %d; output_level_inputs.empty %d "
+          "filesRangeOverlapWithCompaction %d",
+          cf_name_.c_str(), f->fd.GetNumber(), outLevelEmpty,
+          outExpandInputsToCleanCut);
       start_level_inputs_.clear();
       continue;
     }
