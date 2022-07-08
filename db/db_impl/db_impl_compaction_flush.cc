@@ -3446,6 +3446,17 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     TEST_SYNC_POINT("DBImpl::BackgroundCompaction:NonTrivial:AfterRun");
     mutex_.Lock();
 
+    // Some chaos to occasionally wait for another compaction to
+    // finish, too, to increase the likelyhood that two compactions
+    // end at the same time:
+    int r = rand();
+    if (r < 0) {
+      r = -r;
+    }
+    if (r % 10 == 0) {
+      std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
+
     status = compaction_job.Install(*c->mutable_cf_options());
     io_s = compaction_job.io_status();
     if (status.ok()) {
