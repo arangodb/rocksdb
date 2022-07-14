@@ -6,6 +6,7 @@
 #pragma once
 
 #include <ctime>
+
 #include "memory/arena.h"
 #include "port/sys_time.h"
 #include "rocksdb/env.h"
@@ -30,7 +31,7 @@ class LogBuffer {
 
   // Flush all buffered log to the info log.
   void FlushBufferToLog();
-  static const size_t kDefaultMaxLogSize = 512;
+  static const size_t kDefaultMaxLogSize = 2048;
 
  private:
   // One log entry with its timestamp

@@ -17,6 +17,10 @@
 #include "logging/logging.h"
 #include "test_util/sync_point.h"
 
+namespace {
+std::unordered_map<std::size_t, std::size_t> compactedFiles;
+}
+
 namespace ROCKSDB_NAMESPACE {
 
 bool LevelCompactionPicker::NeedsCompaction(
@@ -48,7 +52,7 @@ namespace {
 // A class to build a leveled compaction step-by-step.
 class LevelCompactionBuilder {
  public:
-  LevelCompactionBuilder(const std::string& cf_name,
+  LevelCompactionBuilder(const std::string& cf_name, Version* version,
                          VersionStorageInfo* vstorage,
                          SequenceNumber earliest_mem_seqno,
                          CompactionPicker* compaction_picker,
@@ -57,6 +61,7 @@ class LevelCompactionBuilder {
                          const ImmutableOptions& ioptions,
                          const MutableDBOptions& mutable_db_options)
       : cf_name_(cf_name),
+        version_(version),
         vstorage_(vstorage),
         earliest_mem_seqno_(earliest_mem_seqno),
         compaction_picker_(compaction_picker),
@@ -109,6 +114,7 @@ class LevelCompactionBuilder {
       bool compact_to_next_level);
 
   const std::string& cf_name_;
+  Version* version_;
   VersionStorageInfo* vstorage_;
   SequenceNumber earliest_mem_seqno_;
   CompactionPicker* compaction_picker_;
@@ -334,7 +340,9 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   debug_log << "\nFiles still being compacted";
   for (int i = 0; i < compaction_picker_->NumberLevels(); i++) {
     for (auto& f : vstorage_->LevelFiles(i)) {
-      debug_log << ' ' << f->fd.GetNumber();
+      if (f->being_compacted) {
+        debug_log << ' ' << f->fd.GetNumber();
+      }
     }
   }
 
@@ -342,10 +350,10 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   // to a clean cut.
   SetupInitialFiles();
   if (start_level_inputs_.empty()) {
-    ROCKS_LOG_BUFFER(log_buffer_,
-                     "[%s] CompactionPicker returns null because "
-                     "start_level_inputs_ is empty\n%s",
-                     cf_name_.c_str(), debug_log.str().c_str());
+    ROCKS_LOG_INFO(ioptions_.info_log,
+                   "[%s] CompactionPicker returns null because "
+                   "start_level_inputs_ is empty\n%s",
+                   cf_name_.c_str(), debug_log.str().c_str());
     return nullptr;
   }
   assert(start_level_ >= 0 && output_level_ >= 0);
@@ -353,20 +361,20 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
   // If it is a L0 -> base level compaction, we need to set up other L0
   // files if needed.
   if (!SetupOtherL0FilesIfNeeded()) {
-    ROCKS_LOG_BUFFER(log_buffer_,
-                     "[%s] CompactionPicker returns null because "
-                     "SetupOtherL0FilesIfNeeded returned false\n%s",
-                     cf_name_.c_str(), debug_log.str().c_str());
+    ROCKS_LOG_INFO(ioptions_.info_log,
+                   "[%s] CompactionPicker returns null because "
+                   "SetupOtherL0FilesIfNeeded returned false\n%s",
+                   cf_name_.c_str(), debug_log.str().c_str());
     return nullptr;
   }
 
   // Pick files in the output level and expand more files in the start level
   // if needed.
   if (!SetupOtherInputsIfNeeded()) {
-    ROCKS_LOG_BUFFER(log_buffer_,
-                     "[%s] CompactionPicker returns null because "
-                     "SetupOtherInputsIfNeeded returned false\n%s",
-                     cf_name_.c_str(), debug_log.str().c_str());
+    ROCKS_LOG_INFO(ioptions_.info_log,
+                   "[%s] CompactionPicker returns null because "
+                   "SetupOtherInputsIfNeeded returned false\n%s",
+                   cf_name_.c_str(), debug_log.str().c_str());
     return nullptr;
   }
 
@@ -387,6 +395,21 @@ Compaction* LevelCompactionBuilder::PickCompaction() {
 }
 
 Compaction* LevelCompactionBuilder::GetCompaction() {
+  for (auto& input : compaction_inputs_) {
+    for (auto* f : input.files) {
+      if (auto it = compactedFiles.find(f->fd.GetNumber());
+          it != compactedFiles.end()) {
+        ROCKS_LOG_WARN(ioptions_.info_log,
+                       "[%s] about to compact file %ld AGAIN in version %ld; "
+                       "previous compaction happened in version %ld",
+                       cf_name_.c_str(), it->first,
+                       version_->GetVersionNumber(), it->second);
+      } else {
+        compactedFiles.emplace(f->fd.GetNumber(), version_->GetVersionNumber());
+      }
+    }
+  }
+
   auto c = new Compaction(
       vstorage_, ioptions_, mutable_cf_options_, mutable_db_options_,
       std::move(compaction_inputs_), output_level_,
@@ -581,11 +604,12 @@ bool LevelCompactionBuilder::PickIntraL0Compaction() {
 
 Compaction* LevelCompactionPicker::PickCompaction(
     const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
-    const MutableDBOptions& mutable_db_options, VersionStorageInfo* vstorage,
-    LogBuffer* log_buffer, SequenceNumber earliest_mem_seqno) {
-  LevelCompactionBuilder builder(cf_name, vstorage, earliest_mem_seqno, this,
-                                 log_buffer, mutable_cf_options, ioptions_,
-                                 mutable_db_options);
+    const MutableDBOptions& mutable_db_options, Version* version,
+    VersionStorageInfo* vstorage, LogBuffer* log_buffer,
+    SequenceNumber earliest_mem_seqno) {
+  LevelCompactionBuilder builder(cf_name, version, vstorage, earliest_mem_seqno,
+                                 this, log_buffer, mutable_cf_options,
+                                 ioptions_, mutable_db_options);
   return builder.PickCompaction();
 }
 }  // namespace ROCKSDB_NAMESPACE

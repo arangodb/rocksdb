@@ -58,7 +58,19 @@ class CompactionPicker {
       const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
       const MutableDBOptions& mutable_db_options, VersionStorageInfo* vstorage,
       LogBuffer* log_buffer,
-      SequenceNumber earliest_memtable_seqno = kMaxSequenceNumber) = 0;
+      SequenceNumber earliest_memtable_seqno = kMaxSequenceNumber) {
+    return PickCompaction(cf_name, mutable_cf_options, mutable_db_options,
+                          nullptr, vstorage, log_buffer,
+                          earliest_memtable_seqno);
+  }
+  virtual Compaction* PickCompaction(
+      const std::string& cf_name, const MutableCFOptions& mutable_cf_options,
+      const MutableDBOptions& mutable_db_options, Version* version,
+      VersionStorageInfo* vstorage, LogBuffer* log_buffer,
+      SequenceNumber earliest_memtable_seqno = kMaxSequenceNumber) {
+    return PickCompaction(cf_name, mutable_cf_options, mutable_db_options,
+                          vstorage, log_buffer, earliest_memtable_seqno);
+  }
 
   // Return a compaction object for compacting the range [begin,end] in
   // the specified level.  Returns nullptr if there is nothing in that

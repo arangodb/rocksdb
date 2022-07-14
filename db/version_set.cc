@@ -2890,7 +2890,7 @@ void VersionStorageInfo::ComputeCompactionScore(
         FilesMarkedForForcedBlobGC().empty() &&
         std::all_of(compaction_score_.begin(), compaction_score_.end(),
                     [](auto v) { return v < 1; })) {
-      ROCKS_LOG_WARN(immutable_options.info_log,
+      ROCKS_LOG_INFO(immutable_options.info_log,
                      "Estimated %ld pending compaction bytes, but everything "
                      "is empty!! finalized %d; this %p %s",
                      estimated_compaction_needed_bytes_, (int)finalized_,
