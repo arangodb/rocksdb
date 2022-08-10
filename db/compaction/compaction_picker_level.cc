@@ -425,7 +425,8 @@ Compaction* LevelCompactionBuilder::GetCompaction() {
             version_->GetVersionNumber(), input.level, it->second.first,
             it->second.second, output_level_, f->fd.GetFileSize());
       } else {
-        compactedFiles.emplace(key, version_->GetVersionNumber());
+        compactedFiles.emplace(
+            key, std::make_pair(version_->GetVersionNumber(), output_level_));
       }
     }
   }
@@ -451,9 +452,9 @@ Compaction* LevelCompactionBuilder::GetCompaction() {
   compaction_picker_->RegisterCompaction(c);
 
   // Creating a compaction influences the compaction score because the score
-  // takes running compactions into account (by skipping files that are already
-  // being compacted). Since we just changed compaction score, we recalculate it
-  // here
+  // takes running compactions into account (by skipping files that are
+  // already being compacted). Since we just changed compaction score, we
+  // recalculate it here
   ROCKS_LOG_INFO(ioptions_.info_log,
                  "Calling ComputeCompactionScore from "
                  "LevelCompactionBuilder::GetCompaction. storage %p",
@@ -570,8 +571,8 @@ bool LevelCompactionBuilder::PickFileToCompact() {
       continue;
     }
 
-    // Now that input level is fully expanded, we check whether any output files
-    // are locked due to pending compaction.
+    // Now that input level is fully expanded, we check whether any output
+    // files are locked due to pending compaction.
     //
     // Note we rely on ExpandInputsToCleanCut() to tell us whether any output-
     // level files are locked, not just the extra ones pulled in for user-key
