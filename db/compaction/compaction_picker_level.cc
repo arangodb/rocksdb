@@ -35,7 +35,8 @@ struct hash<::LevelFile> {
 }  // namespace std
 
 namespace {
-std::unordered_map<LevelFile, std::size_t> compactedFiles(10000);
+std::unordered_map<LevelFile, std::pair<std::size_t, int>> compactedFiles(
+    20000);
 }
 namespace ROCKSDB_NAMESPACE {
 
@@ -415,11 +416,14 @@ Compaction* LevelCompactionBuilder::GetCompaction() {
     for (auto* f : input.files) {
       LevelFile key{f->fd.GetNumber(), input.level};
       if (auto it = compactedFiles.find(key); it != compactedFiles.end()) {
-        ROCKS_LOG_WARN(ioptions_.info_log,
-                       "[%s] about to compact file %ld AGAIN in version %ld; "
-                       "previous compaction happened in version %ld",
-                       cf_name_.c_str(), it->first,
-                       version_->GetVersionNumber(), it->second);
+        ROCKS_LOG_WARN(
+            ioptions_.info_log,
+            "[%s] about to compact file %ld@%d AGAIN in version %ld@%d; "
+            "previous compaction happened in version %ld with output level %d; "
+            "current output level: %d; filesize: %ld",
+            cf_name_.c_str(), it->first.fileNumber, it->first.level,
+            version_->GetVersionNumber(), input.level, it->second.first,
+            it->second.second, output_level_, f->fd.GetFileSize());
       } else {
         compactedFiles.emplace(key, version_->GetVersionNumber());
       }
