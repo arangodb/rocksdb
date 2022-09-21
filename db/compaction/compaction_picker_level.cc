@@ -713,8 +713,8 @@ bool LevelCompactionBuilder::PickFileToCompact() {
       vstorage_->FilesByCompactionPri(start_level_);
 
   unsigned int cmp_idx = vstorage_->NextCompactionIndex(start_level_);
-  for (std::size_t i = 0; i < file_size.size(); i++, cmp_idx++) {
-    if (cmp_idx >= file_size.size()) {
+  for (std::size_t i = 0; i < file_scores.size(); i++, cmp_idx++) {
+    if (cmp_idx >= file_scores.size()) {
       // we might be starting in the middle or even the end of the file list,
       // but we might need to reconsider some of the files we have previously
       // skipped, so we need to wraparound. See
@@ -723,7 +723,7 @@ bool LevelCompactionBuilder::PickFileToCompact() {
       cmp_idx = 0;
     }
 
-    int index = file_size[cmp_idx];
+    int index = file_scores[cmp_idx];
     auto* f = level_files[index];
 
     // do not pick a file to compact if it is being compacted
