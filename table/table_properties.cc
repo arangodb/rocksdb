@@ -5,6 +5,7 @@
 
 #include "rocksdb/table_properties.h"
 
+#include "db/seqno_to_time_mapping.h"
 #include "port/malloc.h"
 #include "port/port.h"
 #include "rocksdb/env.h"
@@ -17,7 +18,7 @@
 namespace ROCKSDB_NAMESPACE {
 
 const uint32_t TablePropertiesCollectorFactory::Context::kUnknownColumnFamily =
-    port::kMaxInt32;
+    std::numeric_limits<int32_t>::max();
 
 namespace {
   void AppendProperty(
@@ -39,9 +40,7 @@ namespace {
       const TValue& value,
       const std::string& prop_delim,
       const std::string& kv_delim) {
-    AppendProperty(
-        props, key, ToString(value), prop_delim, kv_delim
-    );
+    AppendProperty(props, key, std::to_string(value), prop_delim, kv_delim);
   }
 }
 
@@ -107,7 +106,7 @@ std::string TableProperties::ToString(
                          ROCKSDB_NAMESPACE::TablePropertiesCollectorFactory::
                              Context::kUnknownColumnFamily
                      ? std::string("N/A")
-                     : ROCKSDB_NAMESPACE::ToString(column_family_id),
+                     : std::to_string(column_family_id),
                  prop_delim, kv_delim);
   AppendProperty(
       result, "column family name",
@@ -164,6 +163,12 @@ std::string TableProperties::ToString(
   Status s = GetUniqueIdFromTableProperties(*this, &id);
   AppendProperty(result, "unique ID",
                  s.ok() ? UniqueIdToHumanString(id) : "N/A", prop_delim,
+                 kv_delim);
+
+  SeqnoToTimeMapping seq_time_mapping;
+  s = seq_time_mapping.Add(seqno_to_time_mapping);
+  AppendProperty(result, "Sequence number to time mapping",
+                 s.ok() ? seq_time_mapping.ToHumanString() : "N/A", prop_delim,
                  kv_delim);
 
   return result;
@@ -309,6 +314,8 @@ const std::string TablePropertiesNames::kSlowCompressionEstimatedDataSize =
     "rocksdb.sample_for_compression.slow.data.size";
 const std::string TablePropertiesNames::kFastCompressionEstimatedDataSize =
     "rocksdb.sample_for_compression.fast.data.size";
+const std::string TablePropertiesNames::kSequenceNumberTimeMapping =
+    "rocksdb.seqno.time.map";
 
 #ifndef NDEBUG
 // WARNING: TEST_SetRandomTableProperties assumes the following layout of

@@ -53,8 +53,8 @@ Slice MetaIndexBuilder::Finish() {
 // object, so there's no need for restart points. Thus we set the restart
 // interval to infinity to save space.
 PropertyBlockBuilder::PropertyBlockBuilder()
-    : properties_block_(
-          new BlockBuilder(port::kMaxInt32 /* restart interval */)) {}
+    : properties_block_(new BlockBuilder(
+          std::numeric_limits<int32_t>::max() /* restart interval */)) {}
 
 void PropertyBlockBuilder::Add(const std::string& name,
                                const std::string& val) {
@@ -153,6 +153,10 @@ void PropertyBlockBuilder::AddTableProperty(const TableProperties& props) {
   }
   if (!props.compression_options.empty()) {
     Add(TablePropertiesNames::kCompressionOptions, props.compression_options);
+  }
+  if (!props.seqno_to_time_mapping.empty()) {
+    Add(TablePropertiesNames::kSequenceNumberTimeMapping,
+        props.seqno_to_time_mapping);
   }
 }
 
@@ -369,6 +373,8 @@ Status ReadTablePropertiesHelper(
       new_table_properties->compression_name = raw_val.ToString();
     } else if (key == TablePropertiesNames::kCompressionOptions) {
       new_table_properties->compression_options = raw_val.ToString();
+    } else if (key == TablePropertiesNames::kSequenceNumberTimeMapping) {
+      new_table_properties->seqno_to_time_mapping = raw_val.ToString();
     } else {
       // handle user-collected properties
       new_table_properties->user_collected_properties.insert(
