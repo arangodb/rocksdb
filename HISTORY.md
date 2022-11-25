@@ -11,6 +11,7 @@
 * Fixed a memory safety bug when using a SecondaryCache with `block_cache_compressed`. `block_cache_compressed` no longer attempts to use SecondaryCache features.
 * Fixed a regression in scan for async_io. During seek, valid buffers were getting cleared causing a regression.
 * Tiered Storage: fixed excessive keys written to penultimate level in non-debug builds.
+* Fixed a regression in iterator where range tombstones after `iterate_upper_bound` is processed.
 
 ### New Features
 * Add basic support for user-defined timestamp to Merge (#10819).
@@ -22,6 +23,9 @@
 ### Public API Changes
 * Marked `block_cache_compressed` as a deprecated feature. Use SecondaryCache instead.
 * Added a `SecondaryCache::InsertSaved()` API, with default implementation depending on `Insert()`. Some implementations might need to add a custom implementation of `InsertSaved()`. (Details in API comments.)
+
+### Behavior changes
+* Make best-efforts recovery verify SST unique ID before Version construction (#10962)
 
 ## 7.8.0 (10/22/2022)
 ### New Features
