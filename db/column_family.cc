@@ -1010,6 +1010,8 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
       // hard bytes limit, we think it is near stop and speed up the slowdown.
       bool near_stop =
           mutable_cf_options.hard_pending_compaction_bytes_limit > 0 &&
+          (compaction_needed_bytes >
+           mutable_cf_options.soft_pending_compaction_bytes_limit) &&
           (compaction_needed_bytes -
            mutable_cf_options.soft_pending_compaction_bytes_limit) >
               3 *
