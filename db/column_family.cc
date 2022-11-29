@@ -1026,10 +1026,9 @@ WriteStallCondition ColumnFamilyData::RecalculateWriteStallConditions(
       ROCKS_LOG_WARN(
           ioptions_.logger,
           "[%s] Stalling writes because of estimated pending compaction "
-          "bytes %" PRIu64 " limit %" PRIu64 " rate %" PRIu64 " near %d",
+          "bytes %" PRIu64 " rate %" PRIu64,
           name_.c_str(), vstorage->estimated_compaction_needed_bytes(),
-          mutable_cf_options.soft_pending_compaction_bytes_limit,
-          write_controller->delayed_write_rate(), (int) near_stop);
+          write_controller->delayed_write_rate());
     } else {
       assert(write_stall_condition == WriteStallCondition::kNormal);
       if (vstorage->l0_delay_trigger_count() >=
