@@ -158,19 +158,19 @@ void PointLockManager::RemoveColumnFamily(const ColumnFamilyHandle* cf) {
 // Look up the LockMap std::shared_ptr for a given column_family_id.
 // Note:  The LockMap is only valid as long as the caller is still holding on
 //   to the returned std::shared_ptr.
-LockMap* PointLockManager::GetLockMap(
+std::shared_ptr<LockMap> PointLockManager::GetLockMap(
     ColumnFamilyId column_family_id) {
   // First check thread-local cache
-  auto lock_maps_cache = static_cast<LockMaps*>(lock_maps_cache_->Get());
-  if (lock_maps_cache == nullptr) {
+  if (lock_maps_cache_->Get() == nullptr) {
     lock_maps_cache_->Reset(new LockMaps());
-    lock_maps_cache = static_cast<LockMaps*>(lock_maps_cache_->Get());
   }
+
+  auto lock_maps_cache = static_cast<LockMaps*>(lock_maps_cache_->Get());
 
   auto lock_map_iter = lock_maps_cache->find(column_family_id);
   if (lock_map_iter != lock_maps_cache->end()) {
     // Found lock map for this column family.
-    return lock_map_iter->second.get();
+    return lock_map_iter->second;
   }
 
   // Not found in local cache, grab mutex and check shared LockMaps
@@ -178,13 +178,13 @@ LockMap* PointLockManager::GetLockMap(
 
   lock_map_iter = lock_maps_.find(column_family_id);
   if (lock_map_iter == lock_maps_.end()) {
-    return nullptr;
+    return std::shared_ptr<LockMap>(nullptr);
   } else {
     // Found lock map.  Store in thread-local cache and return.
     std::shared_ptr<LockMap>& lock_map = lock_map_iter->second;
     lock_maps_cache->insert({column_family_id, lock_map});
 
-    return lock_map.get();
+    return lock_map;
   }
 }
 
@@ -228,7 +228,8 @@ Status PointLockManager::TryLock(PessimisticTransaction* txn,
                                  const std::string& key, Env* env,
                                  bool exclusive) {
   // Lookup lock map for this column family id
-  LockMap* lock_map = GetLockMap(column_family_id);
+  std::shared_ptr<LockMap> lock_map_ptr = GetLockMap(column_family_id);
+  LockMap* lock_map = lock_map_ptr.get();
   if (lock_map == nullptr) {
     char msg[255];
     snprintf(msg, sizeof(msg), "Column family id not found: %" PRIu32,
@@ -577,7 +578,8 @@ void PointLockManager::UnLockKey(PessimisticTransaction* txn,
 void PointLockManager::UnLock(PessimisticTransaction* txn,
                               ColumnFamilyId column_family_id,
                               const std::string& key, Env* env) {
-  LockMap* lock_map = GetLockMap(column_family_id);
+  std::shared_ptr<LockMap> lock_map_ptr = GetLockMap(column_family_id);
+  LockMap* lock_map = lock_map_ptr.get();
   if (lock_map == nullptr) {
     // Column Family must have been dropped.
     return;
@@ -605,7 +607,8 @@ void PointLockManager::UnLock(PessimisticTransaction* txn,
   assert(cf_it != nullptr);
   while (cf_it->HasNext()) {
     ColumnFamilyId cf = cf_it->Next();
-    LockMap* lock_map = GetLockMap(cf);
+    std::shared_ptr<LockMap> lock_map_ptr = GetLockMap(cf);
+    LockMap* lock_map = lock_map_ptr.get();
     if (!lock_map) {
       // Column Family must have been dropped.
       return;
@@ -645,8 +648,6 @@ void PointLockManager::UnLock(PessimisticTransaction* txn,
       // Signal waiting threads to retry locking
       stripe->stripe_cv->NotifyAll();
     }
-
-    keys_by_stripe.clear();
   }
 }
 
