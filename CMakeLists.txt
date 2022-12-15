@@ -1057,6 +1057,7 @@ configure_file(util/build_version.cc.in ${BUILD_VERSION_CC} @ONLY)
 add_library(${ROCKSDB_STATIC_LIB} STATIC ${SOURCES} ${BUILD_VERSION_CC})
 target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE
   ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE absl::flat_hash_map)
 
 if(ROCKSDB_BUILD_SHARED)
   add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES} ${BUILD_VERSION_CC})

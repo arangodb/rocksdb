@@ -21,6 +21,8 @@
 #include "utilities/transactions/lock/lock_manager.h"
 #include "utilities/transactions/lock/point/point_lock_tracker.h"
 
+#include <absl/container/flat_hash_map.h>
+
 namespace ROCKSDB_NAMESPACE {
 
 class ColumnFamilyHandle;
@@ -173,7 +175,7 @@ class PointLockManager : public LockManager {
   InstrumentedMutex lock_map_mutex_;
 
   // Map of ColumnFamilyId to locked key info
-  using LockMaps = UnorderedMap<uint32_t, std::shared_ptr<LockMap>>;
+  using LockMaps = absl::flat_hash_map<uint32_t, std::shared_ptr<LockMap>>;
   LockMaps lock_maps_;
 
   // Thread-local cache of entries in lock_maps_.  This is an optimization
@@ -195,7 +197,7 @@ class PointLockManager : public LockManager {
   bool IsLockExpired(TransactionID txn_id, const LockInfo& lock_info, Env* env,
                      uint64_t* wait_time);
 
-  std::shared_ptr<LockMap> GetLockMap(uint32_t column_family_id);
+  LockMap* GetLockMap(uint32_t column_family_id);
 
   Status AcquireWithTimeout(PessimisticTransaction* txn, LockMap* lock_map,
                             LockMapStripe* stripe, uint32_t column_family_id,

@@ -62,7 +62,7 @@ struct LockMapStripe {
 
   // Locked keys mapped to the info about the transactions that locked them.
   // TODO(agiardullo): Explore performance of other data structures.
-  UnorderedMap<std::string, LockInfo> keys;
+  absl::flat_hash_map<std::string, LockInfo> keys;
 };
 
 // Map of #num_stripes LockMapStripes
@@ -99,7 +99,7 @@ namespace {
 void UnrefLockMapsCache(void* ptr) {
   // Called when a thread exits or a ThreadLocalPtr gets destroyed.
   auto lock_maps_cache =
-      static_cast<UnorderedMap<uint32_t, std::shared_ptr<LockMap>>*>(ptr);
+      static_cast<absl::flat_hash_map<uint32_t, std::shared_ptr<LockMap>>*>(ptr);
   delete lock_maps_cache;
 }
 }  // anonymous namespace
@@ -158,19 +158,19 @@ void PointLockManager::RemoveColumnFamily(const ColumnFamilyHandle* cf) {
 // Look up the LockMap std::shared_ptr for a given column_family_id.
 // Note:  The LockMap is only valid as long as the caller is still holding on
 //   to the returned std::shared_ptr.
-std::shared_ptr<LockMap> PointLockManager::GetLockMap(
+LockMap* PointLockManager::GetLockMap(
     ColumnFamilyId column_family_id) {
   // First check thread-local cache
-  if (lock_maps_cache_->Get() == nullptr) {
-    lock_maps_cache_->Reset(new LockMaps());
-  }
-
   auto lock_maps_cache = static_cast<LockMaps*>(lock_maps_cache_->Get());
+  if (lock_maps_cache == nullptr) {
+    lock_maps_cache_->Reset(new LockMaps());
+    lock_maps_cache = static_cast<LockMaps*>(lock_maps_cache_->Get());
+  }
 
   auto lock_map_iter = lock_maps_cache->find(column_family_id);
   if (lock_map_iter != lock_maps_cache->end()) {
     // Found lock map for this column family.
-    return lock_map_iter->second;
+    return lock_map_iter->second.get();
   }
 
   // Not found in local cache, grab mutex and check shared LockMaps
@@ -178,13 +178,13 @@ std::shared_ptr<LockMap> PointLockManager::GetLockMap(
 
   lock_map_iter = lock_maps_.find(column_family_id);
   if (lock_map_iter == lock_maps_.end()) {
-    return std::shared_ptr<LockMap>(nullptr);
+    return nullptr;
   } else {
     // Found lock map.  Store in thread-local cache and return.
     std::shared_ptr<LockMap>& lock_map = lock_map_iter->second;
     lock_maps_cache->insert({column_family_id, lock_map});
 
-    return lock_map;
+    return lock_map.get();
   }
 }
 
@@ -228,8 +228,7 @@ Status PointLockManager::TryLock(PessimisticTransaction* txn,
                                  const std::string& key, Env* env,
                                  bool exclusive) {
   // Lookup lock map for this column family id
-  std::shared_ptr<LockMap> lock_map_ptr = GetLockMap(column_family_id);
-  LockMap* lock_map = lock_map_ptr.get();
+  LockMap* lock_map = GetLockMap(column_family_id);
   if (lock_map == nullptr) {
     char msg[255];
     snprintf(msg, sizeof(msg), "Column family id not found: %" PRIu32,
@@ -578,8 +577,7 @@ void PointLockManager::UnLockKey(PessimisticTransaction* txn,
 void PointLockManager::UnLock(PessimisticTransaction* txn,
                               ColumnFamilyId column_family_id,
                               const std::string& key, Env* env) {
-  std::shared_ptr<LockMap> lock_map_ptr = GetLockMap(column_family_id);
-  LockMap* lock_map = lock_map_ptr.get();
+  LockMap* lock_map = GetLockMap(column_family_id);
   if (lock_map == nullptr) {
     // Column Family must have been dropped.
     return;
@@ -600,28 +598,32 @@ void PointLockManager::UnLock(PessimisticTransaction* txn,
 
 void PointLockManager::UnLock(PessimisticTransaction* txn,
                               const LockTracker& tracker, Env* env) {
+  absl::flat_hash_map<size_t, std::vector<const std::string*>> keys_by_stripe;
+
   std::unique_ptr<LockTracker::ColumnFamilyIterator> cf_it(
       tracker.GetColumnFamilyIterator());
   assert(cf_it != nullptr);
   while (cf_it->HasNext()) {
     ColumnFamilyId cf = cf_it->Next();
-    std::shared_ptr<LockMap> lock_map_ptr = GetLockMap(cf);
-    LockMap* lock_map = lock_map_ptr.get();
+    LockMap* lock_map = GetLockMap(cf);
     if (!lock_map) {
       // Column Family must have been dropped.
       return;
     }
 
     // Bucket keys by lock_map_ stripe
-    UnorderedMap<size_t, std::vector<const std::string*>> keys_by_stripe(
-        lock_map->num_stripes_);
+    keys_by_stripe.reserve(lock_map->num_stripes_);
     std::unique_ptr<LockTracker::KeyIterator> key_it(
         tracker.GetKeyIterator(cf));
     assert(key_it != nullptr);
     while (key_it->HasNext()) {
       const std::string& key = key_it->Next();
       size_t stripe_num = lock_map->GetStripe(key);
-      keys_by_stripe[stripe_num].push_back(&key);
+      auto& target = keys_by_stripe[stripe_num];
+      if (target.empty()) {
+        target.reserve(8);
+      }
+      target.push_back(&key);
     }
 
     // For each stripe, grab the stripe mutex and unlock all keys in this stripe
@@ -643,6 +645,8 @@ void PointLockManager::UnLock(PessimisticTransaction* txn,
       // Signal waiting threads to retry locking
       stripe->stripe_cv->NotifyAll();
     }
+
+    keys_by_stripe.clear();
   }
 }
 
