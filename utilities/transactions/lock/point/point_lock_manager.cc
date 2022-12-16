@@ -62,7 +62,7 @@ struct LockMapStripe {
 
   // Locked keys mapped to the info about the transactions that locked them.
   // TODO(agiardullo): Explore performance of other data structures.
-  UnorderedMap<std::string, LockInfo> keys;
+  absl::flat_hash_map<std::string, LockInfo> keys;
 };
 
 // Map of #num_stripes LockMapStripes
@@ -99,7 +99,7 @@ namespace {
 void UnrefLockMapsCache(void* ptr) {
   // Called when a thread exits or a ThreadLocalPtr gets destroyed.
   auto lock_maps_cache =
-      static_cast<UnorderedMap<uint32_t, std::shared_ptr<LockMap>>*>(ptr);
+      static_cast<absl::flat_hash_map<uint32_t, std::shared_ptr<LockMap>>*>(ptr);
   delete lock_maps_cache;
 }
 }  // anonymous namespace
@@ -602,6 +602,8 @@ void PointLockManager::UnLock(PessimisticTransaction* txn,
 
 void PointLockManager::UnLock(PessimisticTransaction* txn,
                               const LockTracker& tracker, Env* env) {
+  absl::flat_hash_map<size_t, std::vector<const std::string*>> keys_by_stripe;
+
   std::unique_ptr<LockTracker::ColumnFamilyIterator> cf_it(
       tracker.GetColumnFamilyIterator());
   assert(cf_it != nullptr);
@@ -615,15 +617,18 @@ void PointLockManager::UnLock(PessimisticTransaction* txn,
     }
 
     // Bucket keys by lock_map_ stripe
-    UnorderedMap<size_t, std::vector<const std::string*>> keys_by_stripe(
-        lock_map->num_stripes_);
+    keys_by_stripe.reserve(lock_map->num_stripes_);
     std::unique_ptr<LockTracker::KeyIterator> key_it(
         tracker.GetKeyIterator(cf));
     assert(key_it != nullptr);
     while (key_it->HasNext()) {
       const std::string& key = key_it->Next();
       size_t stripe_num = lock_map->GetStripe(key);
-      keys_by_stripe[stripe_num].push_back(&key);
+      auto& target = keys_by_stripe[stripe_num];
+      if (target.empty()) {
+        target.reserve(8);
+      }
+      target.push_back(&key);
     }
 
     // For each stripe, grab the stripe mutex and unlock all keys in this stripe
