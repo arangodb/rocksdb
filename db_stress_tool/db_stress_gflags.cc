@@ -376,12 +376,12 @@ DEFINE_uint64(periodic_compaction_seconds, 1000,
 DEFINE_uint64(compaction_ttl, 1000,
               "Files older than TTL will be compacted to the next level.");
 
-DEFINE_bool(allow_concurrent_memtable_write, false,
-            "Allow multi-writers to update mem tables in parallel.");
-
 DEFINE_bool(fifo_allow_compaction, false,
             "If true, set `Options::compaction_options_fifo.allow_compaction = "
             "true`. It only take effect when FIFO compaction is used.");
+
+DEFINE_bool(allow_concurrent_memtable_write, false,
+            "Allow multi-writers to update mem tables in parallel.");
 
 DEFINE_double(experimental_mempurge_threshold, 0.0,
               "Maximum estimated useful payload that triggers a "

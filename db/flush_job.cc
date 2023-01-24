@@ -23,6 +23,7 @@
 #include "db/memtable_list.h"
 #include "db/merge_context.h"
 #include "db/range_tombstone_fragmenter.h"
+#include "db/version_edit.h"
 #include "db/version_set.h"
 #include "file/file_util.h"
 #include "file/filename.h"
@@ -199,6 +200,7 @@ void FlushJob::PickMemTable() {
 
   // path 0 for level 0 file.
   meta_.fd = FileDescriptor(versions_->NewFileNumber(), 0, 0);
+  meta_.epoch_number = cfd_->NewEpochNumber();
 
   base_ = cfd_->current();
   base_->Ref();  // it is likely that we do not need this reference
@@ -939,7 +941,7 @@ Status FlushJob::WriteLevel0Table() {
           cfd_->internal_stats(), &io_s, io_tracer_,
           BlobFileCreationReason::kFlush, seqno_to_time_mapping_, event_logger_,
           job_context_->job_id, io_priority, &table_properties_, write_hint,
-          full_history_ts_low, blob_callback_, &num_input_entries,
+          full_history_ts_low, blob_callback_, base_, &num_input_entries,
           &memtable_payload_bytes, &memtable_garbage_bytes);
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());
@@ -999,9 +1001,9 @@ Status FlushJob::WriteLevel0Table() {
                    meta_.fd.smallest_seqno, meta_.fd.largest_seqno,
                    meta_.marked_for_compaction, meta_.temperature,
                    meta_.oldest_blob_file_number, meta_.oldest_ancester_time,
-                   meta_.file_creation_time, meta_.file_checksum,
-                   meta_.file_checksum_func_name, meta_.unique_id);
-
+                   meta_.file_creation_time, meta_.epoch_number,
+                   meta_.file_checksum, meta_.file_checksum_func_name,
+                   meta_.unique_id, meta_.compensated_range_deletion_size);
     edit_->SetBlobFileAdditions(std::move(blob_file_additions));
   }
 #ifndef ROCKSDB_LITE
