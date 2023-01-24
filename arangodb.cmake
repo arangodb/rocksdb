@@ -9,7 +9,6 @@ endif()
 
 # we want the following definitions to be in effect for both rocksdb and arangodb
 add_definitions("-DNROCKSDB_THREAD_STATUS")
-add_definitions("-DROCKSDB_SUPPORT_THREAD_LOCAL")
 
 # IPO_ENABLED is set by the top-level CMakeLists.txt file
 if (IPO_ENABLED)
