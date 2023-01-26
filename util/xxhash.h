@@ -189,7 +189,7 @@
  */
 
 #if defined (__cplusplus)
-extern "C" {
+//extern "C" {
 #endif
 
 /* ****************************
@@ -6356,5 +6356,5 @@ XXH3_generateSecret_fromSeed(XXH_NOESCAPE void* secretBuffer, XXH64_hash_t seed)
 
 
 #if defined (__cplusplus)
-}
+//}
 #endif
