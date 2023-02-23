@@ -57,7 +57,7 @@
 
 // clang-format off
 #if defined (__cplusplus)
-extern "C" {
+//extern "C" {
 #endif
 
 
@@ -1758,7 +1758,7 @@ XXPH3_64bits_withSeed(const void* input, size_t len, XXPH64_hash_t seed)
 #endif /* XXPH_STATIC_LINKING_ONLY */
 
 #if defined (__cplusplus)
-}
+//}
 #endif
 
 #endif /* XXPHASH_H_5627135585666179 */
