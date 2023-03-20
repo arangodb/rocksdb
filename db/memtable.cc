@@ -1078,7 +1078,7 @@ static bool SaveValue(void* arg, const char* entry) {
                 *(s->value) = std::move(result);
               } else {
                 assert(s->columns);
-                s->columns->SetPlainValue(result);
+                s->columns->SetPlainValue(std::move(result));
               }
             }
           }
@@ -1152,7 +1152,7 @@ static bool SaveValue(void* arg, const char* entry) {
                 /* op_failure_scope */ nullptr);
 
             if (s->status->ok()) {
-              *(s->status) = s->columns->SetWideColumnValue(result);
+              *(s->status) = s->columns->SetWideColumnValue(std::move(result));
             }
           }
         } else if (s->value) {
@@ -1200,7 +1200,7 @@ static bool SaveValue(void* arg, const char* entry) {
                 *(s->value) = std::move(result);
               } else {
                 assert(s->columns);
-                s->columns->SetPlainValue(result);
+                s->columns->SetPlainValue(std::move(result));
               }
             }
           } else {
@@ -1230,6 +1230,8 @@ static bool SaveValue(void* arg, const char* entry) {
         *(s->merge_in_progress) = true;
         merge_context->PushOperand(
             v, s->inplace_update_support == false /* operand_pinned */);
+        PERF_COUNTER_ADD(internal_merge_point_lookup_count, 1);
+
         if (s->do_merge && merge_operator->ShouldMerge(
                                merge_context->GetOperandsDirectionBackward())) {
           if (s->value || s->columns) {
@@ -1249,7 +1251,7 @@ static bool SaveValue(void* arg, const char* entry) {
                 *(s->value) = std::move(result);
               } else {
                 assert(s->columns);
-                s->columns->SetPlainValue(result);
+                s->columns->SetPlainValue(std::move(result));
               }
             }
           }
