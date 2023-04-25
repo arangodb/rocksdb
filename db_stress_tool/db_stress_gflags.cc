@@ -749,6 +749,9 @@ DEFINE_bool(use_multiget, false,
 
 DEFINE_bool(use_get_entity, false, "If set, use the GetEntity API for reads");
 
+DEFINE_bool(use_multi_get_entity, false,
+            "If set, use the MultiGetEntity API for reads");
+
 static bool ValidateInt32Percent(const char* flagname, int32_t value) {
   if (value < 0 || value > 100) {
     fprintf(stderr, "Invalid value for --%s: %d, 0<= pct <=100 \n", flagname,
@@ -1047,6 +1050,11 @@ DEFINE_int32(
 DEFINE_bool(allow_data_in_errors,
             ROCKSDB_NAMESPACE::Options().allow_data_in_errors,
             "If true, allow logging data, e.g. key, value in LOG files.");
+
+DEFINE_bool(enable_thread_tracking,
+            ROCKSDB_NAMESPACE::Options().enable_thread_tracking,
+            "If true, the status of the threads involved in this DB will be "
+            "tracked and available via GetThreadList() API.");
 
 DEFINE_int32(verify_iterator_with_expected_state_one_in, 0,
              "If non-zero, when TestIterate() is to be called, there is a "
