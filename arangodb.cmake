@@ -37,6 +37,8 @@ if (WIN32)
   set(WITH_MD_LIBRARY OFF CACHE BOOL "override option in rocksdb lib" FORCE) #libraries should not touch this (/MD /MT) at all!
 endif ()
 set(PORTABLE On CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)")
+set(FORCE_SSE42 ON CACHE BOOL "force building with SSE4.2, even when PORTABLE=ON")
+set(FORCE_AVX ON CACHE BOOL "force building with AVX, even when PORTABLE=ON")
 
 set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "build shared libraries")
 set(WITH_TOOLS OFF CACHE BOOL "disable tools")
