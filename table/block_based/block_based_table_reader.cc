@@ -560,7 +560,8 @@ Status BlockBasedTable::Open(
     const EnvOptions& env_options, const BlockBasedTableOptions& table_options,
     const InternalKeyComparator& internal_comparator,
     std::unique_ptr<RandomAccessFileReader>&& file, uint64_t file_size,
-    std::unique_ptr<TableReader>* table_reader,
+    uint8_t block_protection_bytes_per_key,
+    std::unique_ptr<TableReader>* table_reader, uint64_t tail_size,
     std::shared_ptr<CacheReservationManager> table_reader_cache_res_mgr,
     const std::shared_ptr<const SliceTransform>& prefix_extractor,
     const bool prefetch_index_and_filter_in_cache, const bool skip_filters,
@@ -592,7 +593,8 @@ Status BlockBasedTable::Open(
   if (!ioptions.allow_mmap_reads) {
     s = PrefetchTail(ro, file.get(), file_size, force_direct_prefetch,
                      tail_prefetch_stats, prefetch_all, preload_all,
-                     &prefetch_buffer, ioptions.stats);
+                     &prefetch_buffer, ioptions.stats, tail_size,
+                     ioptions.logger);
     // Return error in prefetch path to users.
     if (!s.ok()) {
       return s;
@@ -645,6 +647,7 @@ Status BlockBasedTable::Open(
   // meta-block reads.
   rep->compression_dict_handle = BlockHandle::NullBlockHandle();
 
+  rep->create_context.protection_bytes_per_key = block_protection_bytes_per_key;
   // Read metaindex
   std::unique_ptr<BlockBasedTable> new_table(
       new BlockBasedTable(rep, block_cache_tracer));
@@ -671,9 +674,11 @@ Status BlockBasedTable::Open(
            CompressionTypeToString(kZSTD) ||
        rep->table_properties->compression_name ==
            CompressionTypeToString(kZSTDNotFinalCompression));
-  rep->create_context =
-      BlockCreateContext(&rep->table_options, rep->ioptions.stats,
-                         blocks_definitely_zstd_compressed);
+  rep->create_context = BlockCreateContext(
+      &rep->table_options, rep->ioptions.stats,
+      blocks_definitely_zstd_compressed, block_protection_bytes_per_key,
+      rep->internal_comparator.user_comparator(), rep->index_value_is_full,
+      rep->index_has_first_key);
 
   // Check expected unique id if provided
   if (expected_unique_id != kNullUniqueId64x2) {
@@ -803,21 +808,40 @@ Status BlockBasedTable::PrefetchTail(
     const ReadOptions& ro, RandomAccessFileReader* file, uint64_t file_size,
     bool force_direct_prefetch, TailPrefetchStats* tail_prefetch_stats,
     const bool prefetch_all, const bool preload_all,
-    std::unique_ptr<FilePrefetchBuffer>* prefetch_buffer, Statistics* stats) {
+    std::unique_ptr<FilePrefetchBuffer>* prefetch_buffer, Statistics* stats,
+    uint64_t tail_size, Logger* const logger) {
+  assert(tail_size <= file_size);
+
   size_t tail_prefetch_size = 0;
-  if (tail_prefetch_stats != nullptr) {
-    // Multiple threads may get a 0 (no history) when running in parallel,
-    // but it will get cleared after the first of them finishes.
-    tail_prefetch_size = tail_prefetch_stats->GetSuggestedPrefetchSize();
-  }
-  if (tail_prefetch_size == 0) {
-    // Before read footer, readahead backwards to prefetch data. Do more
-    // readahead if we're going to read index/filter.
-    // TODO: This may incorrectly select small readahead in case partitioned
-    // index/filter is enabled and top-level partition pinning is enabled.
-    // That's because we need to issue readahead before we read the properties,
-    // at which point we don't yet know the index type.
-    tail_prefetch_size = prefetch_all || preload_all ? 512 * 1024 : 4 * 1024;
+  if (tail_size != 0) {
+    tail_prefetch_size = tail_size;
+  } else {
+    if (tail_prefetch_stats != nullptr) {
+      // Multiple threads may get a 0 (no history) when running in parallel,
+      // but it will get cleared after the first of them finishes.
+      tail_prefetch_size = tail_prefetch_stats->GetSuggestedPrefetchSize();
+    }
+    if (tail_prefetch_size == 0) {
+      // Before read footer, readahead backwards to prefetch data. Do more
+      // readahead if we're going to read index/filter.
+      // TODO: This may incorrectly select small readahead in case partitioned
+      // index/filter is enabled and top-level partition pinning is enabled.
+      // That's because we need to issue readahead before we read the
+      // properties, at which point we don't yet know the index type.
+      tail_prefetch_size =
+          prefetch_all || preload_all
+              ? static_cast<size_t>(4 * 1024 + 0.01 * file_size)
+              : 4 * 1024;
+
+      ROCKS_LOG_WARN(logger,
+                     "Tail prefetch size %zu is calculated based on heuristics",
+                     tail_prefetch_size);
+    } else {
+      ROCKS_LOG_WARN(
+          logger,
+          "Tail prefetch size %zu is calculated based on TailPrefetchStats",
+          tail_prefetch_size);
+    }
   }
   size_t prefetch_off;
   size_t prefetch_len;
@@ -1136,7 +1160,8 @@ Status BlockBasedTable::PrefetchIndexAndFilterBlocks(
   // are hence follow the configuration for pin and prefetch regardless of
   // the value of cache_index_and_filter_blocks
   if (prefetch_all || pin_partition) {
-    s = rep_->index_reader->CacheDependencies(ro, pin_partition);
+    s = rep_->index_reader->CacheDependencies(ro, pin_partition,
+                                              prefetch_buffer);
   }
   if (!s.ok()) {
     return s;
@@ -1160,7 +1185,7 @@ Status BlockBasedTable::PrefetchIndexAndFilterBlocks(
     if (filter) {
       // Refer to the comment above about paritioned indexes always being cached
       if (prefetch_all || pin_partition) {
-        s = filter->CacheDependencies(ro, pin_partition);
+        s = filter->CacheDependencies(ro, pin_partition, prefetch_buffer);
         if (!s.ok()) {
           return s;
         }
@@ -1791,8 +1816,8 @@ BlockBasedTable::PartitionedIndexIteratorState::NewSecondaryIterator(
 bool BlockBasedTable::PrefixRangeMayMatch(
     const Slice& internal_key, const ReadOptions& read_options,
     const SliceTransform* options_prefix_extractor,
-    const bool need_upper_bound_check,
-    BlockCacheLookupContext* lookup_context) const {
+    const bool need_upper_bound_check, BlockCacheLookupContext* lookup_context,
+    bool* filter_checked) const {
   if (!rep_->filter_policy) {
     return true;
   }
@@ -1817,7 +1842,7 @@ bool BlockBasedTable::PrefixRangeMayMatch(
   bool may_match = true;
 
   FilterBlockReader* const filter = rep_->filter.get();
-  bool filter_checked = false;
+  *filter_checked = false;
   if (filter != nullptr) {
     const bool no_io = read_options.read_tier == kBlockCacheTier;
 
@@ -1825,16 +1850,8 @@ bool BlockBasedTable::PrefixRangeMayMatch(
     may_match = filter->RangeMayExist(
         read_options.iterate_upper_bound, user_key_without_ts, prefix_extractor,
         rep_->internal_comparator.user_comparator(), const_ikey_ptr,
-        &filter_checked, need_upper_bound_check, no_io, lookup_context,
+        filter_checked, need_upper_bound_check, no_io, lookup_context,
         read_options);
-  }
-
-  if (filter_checked) {
-    Statistics* statistics = rep_->ioptions.stats;
-    RecordTick(statistics, BLOOM_FILTER_PREFIX_CHECKED);
-    if (!may_match) {
-      RecordTick(statistics, BLOOM_FILTER_PREFIX_USEFUL);
-    }
   }
 
   return may_match;
@@ -1850,6 +1867,13 @@ bool BlockBasedTable::PrefixExtractorChanged(
     return PrefixExtractorChangedHelper(rep_->table_properties.get(),
                                         prefix_extractor);
   }
+}
+
+Statistics* BlockBasedTable::GetStatistics() const {
+  return rep_->ioptions.stats;
+}
+bool BlockBasedTable::IsLastLevel() const {
+  return rep_->level == rep_->ioptions.num_levels - 1;
 }
 
 InternalIterator* BlockBasedTable::NewIterator(
@@ -1912,18 +1936,29 @@ bool BlockBasedTable::FullFilterKeyMayMatch(
   if (rep_->whole_key_filtering) {
     may_match = filter->KeyMayMatch(user_key_without_ts, no_io, const_ikey_ptr,
                                     get_context, lookup_context, read_options);
+    if (may_match) {
+      RecordTick(rep_->ioptions.stats, BLOOM_FILTER_FULL_POSITIVE);
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_positive, 1, rep_->level);
+    } else {
+      RecordTick(rep_->ioptions.stats, BLOOM_FILTER_USEFUL);
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, 1, rep_->level);
+    }
   } else if (!PrefixExtractorChanged(prefix_extractor) &&
-             prefix_extractor->InDomain(user_key_without_ts) &&
-             !filter->PrefixMayMatch(
-                 prefix_extractor->Transform(user_key_without_ts), no_io,
-                 const_ikey_ptr, get_context, lookup_context, read_options)) {
+             prefix_extractor->InDomain(user_key_without_ts)) {
     // FIXME ^^^: there should be no reason for Get() to depend on current
     // prefix_extractor at all. It should always use table_prefix_extractor.
-    may_match = false;
-  }
-  if (may_match) {
-    RecordTick(rep_->ioptions.stats, BLOOM_FILTER_FULL_POSITIVE);
-    PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_positive, 1, rep_->level);
+    may_match = filter->PrefixMayMatch(
+        prefix_extractor->Transform(user_key_without_ts), no_io, const_ikey_ptr,
+        get_context, lookup_context, read_options);
+    RecordTick(rep_->ioptions.stats, BLOOM_FILTER_PREFIX_CHECKED);
+    if (may_match) {
+      // Includes prefix stats
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_positive, 1, rep_->level);
+    } else {
+      RecordTick(rep_->ioptions.stats, BLOOM_FILTER_PREFIX_USEFUL);
+      // Includes prefix stats
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, 1, rep_->level);
+    }
   }
   return may_match;
 }
@@ -1959,10 +1994,18 @@ void BlockBasedTable::FullFilterKeysMayMatch(
                              read_options);
     RecordTick(rep_->ioptions.stats, BLOOM_FILTER_PREFIX_CHECKED, before_keys);
     uint64_t after_keys = range->KeysLeft();
+    if (after_keys) {
+      // Includes prefix stats
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_positive, after_keys,
+                                rep_->level);
+    }
     uint64_t filtered_keys = before_keys - after_keys;
     if (filtered_keys) {
       RecordTick(rep_->ioptions.stats, BLOOM_FILTER_PREFIX_USEFUL,
                  filtered_keys);
+      // Includes prefix stats
+      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, filtered_keys,
+                                rep_->level);
     }
   }
 }
@@ -1980,8 +2023,8 @@ Status BlockBasedTable::ApproximateKeyAnchors(const ReadOptions& read_options,
   // `CacheDependencies()` brings all the blocks into cache using one I/O. That
   // way the full index scan usually finds the index data it is looking for in
   // cache rather than doing an I/O for each "dependency" (partition).
-  Status s =
-      rep_->index_reader->CacheDependencies(read_options, false /* pin */);
+  Status s = rep_->index_reader->CacheDependencies(
+      read_options, false /* pin */, nullptr /* prefetch_buffer */);
   if (!s.ok()) {
     return s;
   }
@@ -2075,10 +2118,7 @@ Status BlockBasedTable::Get(const ReadOptions& read_options, const Slice& key,
       FullFilterKeyMayMatch(filter, key, no_io, prefix_extractor, get_context,
                             &lookup_context, read_options);
   TEST_SYNC_POINT("BlockBasedTable::Get:AfterFilterMatch");
-  if (!may_match) {
-    RecordTick(rep_->ioptions.stats, BLOOM_FILTER_USEFUL);
-    PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, 1, rep_->level);
-  } else {
+  if (may_match) {
     IndexBlockIter iiter_on_stack;
     // if prefix_extractor found in block differs from options, disable
     // BlockPrefixIndex. Only do this check when index_type is kHashSearch.
@@ -2168,6 +2208,9 @@ Status BlockBasedTable::Get(const ReadOptions& read_options, const Slice& key,
           }
         }
         s = biter.status();
+        if (!s.ok()) {
+          break;
+        }
       }
       // Write the block cache access record.
       if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
@@ -2190,10 +2233,16 @@ Status BlockBasedTable::Get(const ReadOptions& read_options, const Slice& key,
       }
     }
     if (matched && filter != nullptr) {
-      RecordTick(rep_->ioptions.stats, BLOOM_FILTER_FULL_TRUE_POSITIVE);
+      if (rep_->whole_key_filtering) {
+        RecordTick(rep_->ioptions.stats, BLOOM_FILTER_FULL_TRUE_POSITIVE);
+      } else {
+        RecordTick(rep_->ioptions.stats, BLOOM_FILTER_PREFIX_TRUE_POSITIVE);
+      }
+      // Includes prefix stats
       PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_true_positive, 1,
                                 rep_->level);
     }
+
     if (s.ok() && !iiter->status().IsNotFound()) {
       s = iiter->status();
     }

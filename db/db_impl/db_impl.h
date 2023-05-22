@@ -534,6 +534,11 @@ class DBImpl : public DB {
       const ExportImportFilesMetaData& metadata,
       ColumnFamilyHandle** handle) override;
 
+  using DB::ClipColumnFamily;
+  virtual Status ClipColumnFamily(ColumnFamilyHandle* column_family,
+                                  const Slice& begin_key,
+                                  const Slice& end_key) override;
+
   using DB::VerifyFileChecksums;
   Status VerifyFileChecksums(const ReadOptions& read_options) override;
 
@@ -1053,10 +1058,16 @@ class DBImpl : public DB {
 
   VersionSet* GetVersionSet() const { return versions_.get(); }
 
-  // Wait for any compaction
-  // We add a bool parameter to wait for unscheduledCompactions_ == 0, but this
-  // is only for the special test of CancelledCompactions
-  Status WaitForCompact(bool waitUnscheduled = false);
+  // Wait for all flush and compactions jobs to finish. Jobs to wait include the
+  // unscheduled (queued, but not scheduled yet). If the db is shutting down,
+  // Status::ShutdownInProgress will be returned. If PauseBackgroundWork() was
+  // called prior to this, this may potentially wait for unscheduled jobs
+  // indefinitely. abort_on_pause can be set to true to abort, and
+  // Status::Aborted will be returned immediately. This may also never return if
+  // there's sufficient ongoing writes that keeps flush and compaction going
+  // without stopping. The user would have to cease all the writes to DB to make
+  // this eventually return in a stable state.
+  Status WaitForCompact(bool abort_on_pause = false);
 
 #ifndef NDEBUG
   // Compact any files in the named level that overlap [*begin, *end]
@@ -1096,9 +1107,7 @@ class DBImpl : public DB {
   Status TEST_WaitForFlushMemTable(ColumnFamilyHandle* column_family = nullptr);
 
   // Wait for any compaction
-  // We add a bool parameter to wait for unscheduledCompactions_ == 0, but this
-  // is only for the special test of CancelledCompactions
-  Status TEST_WaitForCompact(bool waitUnscheduled = false);
+  Status TEST_WaitForCompact(bool abort_on_pause = false);
 
   // Wait for any background purge
   Status TEST_WaitForPurge();
@@ -2310,7 +2319,7 @@ class DBImpl : public DB {
   // logfile_number_. With two_write_queues it also protects alive_log_files_,
   // and log_empty_. Refer to the definition of each variable below for more
   // details.
-  // Note: to avoid dealock, if needed to acquire both log_write_mutex_ and
+  // Note: to avoid deadlock, if needed to acquire both log_write_mutex_ and
   // mutex_, the order should be first mutex_ and then log_write_mutex_.
   InstrumentedMutex log_write_mutex_;
 

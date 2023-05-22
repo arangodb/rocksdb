@@ -98,7 +98,8 @@ class BlockBasedTable : public TableReader {
       const BlockBasedTableOptions& table_options,
       const InternalKeyComparator& internal_key_comparator,
       std::unique_ptr<RandomAccessFileReader>&& file, uint64_t file_size,
-      std::unique_ptr<TableReader>* table_reader,
+      uint8_t block_protection_bytes_per_key,
+      std::unique_ptr<TableReader>* table_reader, uint64_t tail_size,
       std::shared_ptr<CacheReservationManager> table_reader_cache_res_mgr =
           nullptr,
       const std::shared_ptr<const SliceTransform>& prefix_extractor = nullptr,
@@ -116,7 +117,8 @@ class BlockBasedTable : public TableReader {
                            const ReadOptions& read_options,
                            const SliceTransform* options_prefix_extractor,
                            const bool need_upper_bound_check,
-                           BlockCacheLookupContext* lookup_context) const;
+                           BlockCacheLookupContext* lookup_context,
+                           bool* filter_checked) const;
 
   // Returns a new iterator over the table contents.
   // The result of NewIterator() is initially invalid (caller must
@@ -224,8 +226,9 @@ class BlockBasedTable : public TableReader {
     virtual size_t ApproximateMemoryUsage() const = 0;
     // Cache the dependencies of the index reader (e.g. the partitions
     // of a partitioned index).
-    virtual Status CacheDependencies(const ReadOptions& /*ro*/,
-                                     bool /* pin */) {
+    virtual Status CacheDependencies(
+        const ReadOptions& /*ro*/, bool /* pin */,
+        FilePrefetchBuffer* /* tail_prefetch_buffer */) {
       return Status::OK();
     }
   };
@@ -245,6 +248,9 @@ class BlockBasedTable : public TableReader {
                                           GetContext* get_context, size_t usage,
                                           bool redundant,
                                           Statistics* const statistics);
+
+  Statistics* GetStatistics() const;
+  bool IsLastLevel() const;
 
   // Get the size to read from storage for a BlockHandle. size_t because we
   // are about to load into memory.
@@ -457,7 +463,8 @@ class BlockBasedTable : public TableReader {
       const ReadOptions& ro, RandomAccessFileReader* file, uint64_t file_size,
       bool force_direct_prefetch, TailPrefetchStats* tail_prefetch_stats,
       const bool prefetch_all, const bool preload_all,
-      std::unique_ptr<FilePrefetchBuffer>* prefetch_buffer, Statistics* stats);
+      std::unique_ptr<FilePrefetchBuffer>* prefetch_buffer, Statistics* stats,
+      uint64_t tail_size, Logger* const logger);
   Status ReadMetaIndexBlock(const ReadOptions& ro,
                             FilePrefetchBuffer* prefetch_buffer,
                             std::unique_ptr<Block>* metaindex_block,

@@ -33,14 +33,7 @@ if (WIN32)
   set(WITH_MD_LIBRARY OFF CACHE BOOL "override option in rocksdb lib" FORCE) #libraries should not touch this (/MD /MT) at all!
 endif ()
 
-set(PORTABLE ON CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
-if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-  set(FORCE_SSE42 ON CACHE BOOL "force building with SSE4.2, even when PORTABLE=ON" FORCE)
-  set(FORCE_AVX ON CACHE BOOL "force building with AVX, even when PORTABLE=ON" FORCE)
-elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|AARCH64")
-  set(FORCE_SSE42 OFF CACHE BOOL "force building with SSE4.2, even when PORTABLE=ON" FORCE)
-  set(FORCE_AVX OFF CACHE BOOL "force building with AVX, even when PORTABLE=ON" FORCE)
-endif ()
+set(PORTABLE "haswell" CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
 
 set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "build shared libraries")
 set(WITH_TOOLS OFF CACHE BOOL "disable tools")
