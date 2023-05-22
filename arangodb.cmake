@@ -33,7 +33,14 @@ if (WIN32)
   set(WITH_MD_LIBRARY OFF CACHE BOOL "override option in rocksdb lib" FORCE) #libraries should not touch this (/MD /MT) at all!
 endif ()
 
-set(PORTABLE "haswell" CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+  set(PORTABLE "haswell" CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|AARCH64")
+  set(PORTABLE 1 CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+else ()
+  message(WARNING "unknown architecture") 
+  set(PORTABLE 1 CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+endif ()
 
 set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "build shared libraries")
 set(WITH_TOOLS OFF CACHE BOOL "disable tools")
