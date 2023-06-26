@@ -229,7 +229,7 @@ class Transaction {
 
   // Discard all batched writes in this transaction.
   virtual Status Rollback() = 0;
-
+  
   // Records the state of the transaction for future calls to
   // RollbackToSavePoint().  May be called multiple times to set multiple save
   // points.
@@ -246,6 +246,14 @@ class Transaction {
   // will be returned.
   // Otherwise returns Status::OK().
   virtual Status PopSavePoint() = 0;
+  
+  // Toggle the concurrency control for the transaction from this operation on.
+  // if value is set to true, concurrency control for all following operations
+  // in the transaction is skipped. If value is set to false, concurrency
+  // control is enabled for all following operations in the transaction.
+  virtual Status SetSkipConcurrencyControl(bool /*value*/) {
+    return Status::NotSupported();
+  }
 
   // This function is similar to DB::Get() except it will also read pending
   // changes in this transaction.  Currently, this function will return

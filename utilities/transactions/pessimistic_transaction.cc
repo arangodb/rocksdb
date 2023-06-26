@@ -109,6 +109,11 @@ void PessimisticTransaction::Clear() {
   txn_db_impl_->UnLock(this, *tracked_locks_);
   TransactionBaseImpl::Clear();
 }
+  
+Status PessimisticTransaction::SetSkipConcurrencyControl(bool value) {
+  skip_concurrency_control_ = value;
+  return Status::OK();
+}
 
 void PessimisticTransaction::Reinitialize(
     TransactionDB* txn_db, const WriteOptions& write_options,
