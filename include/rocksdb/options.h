@@ -1966,6 +1966,10 @@ struct LiveFilesStorageInfoOptions {
   // Flushes memtables if total size in bytes of live WAL files is >= this
   // number. Default: always force a flush without checking sizes.
   uint64_t wal_size_for_flush = 0;
+
+  // Include all wal files (also archived ones). This might be useful if the
+  // application wants to consume the wal files later on.
+  bool include_all_wal_files = false;
 };
 #endif  // !ROCKSDB_LITE
 
