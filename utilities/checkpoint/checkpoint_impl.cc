@@ -120,7 +120,10 @@ Status CheckpointImpl::CreateCheckpoint(const std::string& checkpoint_dir,
   CleanStagingDirectory(full_private_path, db_options.info_log.get());
   // create snapshot directory
   s = db_->GetEnv()->CreateDir(full_private_path);
-  s = db_->GetEnv()->CreateDir(full_private_path + "/archive");
+  if (opts.include_all_wal_files) {
+    // archive file only needed if we include all wal files
+    s = db_->GetEnv()->CreateDir(full_private_path + "/archive");
+  }
 
   uint64_t sequence_number = 0;
   if (s.ok()) {
