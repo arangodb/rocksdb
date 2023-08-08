@@ -561,7 +561,7 @@ if(HAVE_SCHED_GETCPU)
   add_definitions(-DROCKSDB_SCHED_GETCPU_PRESENT)
 endif()
 
-check_cxx_symbol_exists(getauxval auvx.h HAVE_AUXV_GETAUXVAL)
+check_cxx_symbol_exists(getauxval "sys/auxv.h" HAVE_AUXV_GETAUXVAL)
 if(HAVE_AUXV_GETAUXVAL)
   add_definitions(-DROCKSDB_AUXV_GETAUXVAL_PRESENT)
 endif()
@@ -879,6 +879,8 @@ set(SOURCES
         util/string_util.cc
         util/thread_local.cc
         util/threadpool_imp.cc
+        util/udt_util.cc
+        util/write_batch_util.cc
         util/xxhash.cc
         utilities/agg_merge/agg_merge.cc
         utilities/backup/backup_engine.cc
@@ -1438,6 +1440,7 @@ if(WITH_TESTS)
         util/timer_test.cc
         util/thread_list_test.cc
         util/thread_local_test.cc
+        util/udt_util_test.cc
         util/work_queue_test.cc
         utilities/agg_merge/agg_merge_test.cc
         utilities/backup/backup_engine_test.cc
@@ -1606,3 +1609,6 @@ option(WITH_BENCHMARK "build benchmark tests" OFF)
 if(WITH_BENCHMARK)
   add_subdirectory(${PROJECT_SOURCE_DIR}/microbench/)
 endif()
+
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)

@@ -531,7 +531,7 @@ class DBImpl : public DB {
   virtual Status CreateColumnFamilyWithImport(
       const ColumnFamilyOptions& options, const std::string& column_family_name,
       const ImportColumnFamilyOptions& import_options,
-      const ExportImportFilesMetaData& metadata,
+      const std::vector<const ExportImportFilesMetaData*>& metadatas,
       ColumnFamilyHandle** handle) override;
 
   using DB::ClipColumnFamily;
@@ -811,6 +811,8 @@ class DBImpl : public DB {
   // being deleted.
   uint64_t MinObsoleteSstNumberToKeep();
 
+  uint64_t GetObsoleteSstFilesSize();
+
   // Returns the list of live files in 'live' and the list
   // of all files in the filesystem in 'candidate_files'.
   // If force == false and the last call was less than
@@ -1058,16 +1060,8 @@ class DBImpl : public DB {
 
   VersionSet* GetVersionSet() const { return versions_.get(); }
 
-  // Wait for all flush and compactions jobs to finish. Jobs to wait include the
-  // unscheduled (queued, but not scheduled yet). If the db is shutting down,
-  // Status::ShutdownInProgress will be returned. If PauseBackgroundWork() was
-  // called prior to this, this may potentially wait for unscheduled jobs
-  // indefinitely. abort_on_pause can be set to true to abort, and
-  // Status::Aborted will be returned immediately. This may also never return if
-  // there's sufficient ongoing writes that keeps flush and compaction going
-  // without stopping. The user would have to cease all the writes to DB to make
-  // this eventually return in a stable state.
-  Status WaitForCompact(bool abort_on_pause = false);
+  Status WaitForCompact(
+      const WaitForCompactOptions& wait_for_compact_options) override;
 
 #ifndef NDEBUG
   // Compact any files in the named level that overlap [*begin, *end]
@@ -1106,8 +1100,9 @@ class DBImpl : public DB {
   // Wait for memtable compaction
   Status TEST_WaitForFlushMemTable(ColumnFamilyHandle* column_family = nullptr);
 
-  // Wait for any compaction
-  Status TEST_WaitForCompact(bool abort_on_pause = false);
+  Status TEST_WaitForCompact();
+  Status TEST_WaitForCompact(
+      const WaitForCompactOptions& wait_for_compact_options);
 
   // Wait for any background purge
   Status TEST_WaitForPurge();
@@ -1416,6 +1411,9 @@ class DBImpl : public DB {
 
   void NotifyOnExternalFileIngested(
       ColumnFamilyData* cfd, const ExternalSstFileIngestionJob& ingestion_job);
+
+  Status FlushAllColumnFamilies(const FlushOptions& flush_options,
+                                FlushReason flush_reason);
 
   virtual Status FlushForGetLiveFiles();
 
@@ -2065,6 +2063,10 @@ class DBImpl : public DB {
     // flush is considered complete.
     std::unordered_map<ColumnFamilyData*, uint64_t>
         cfd_to_max_mem_id_to_persist;
+
+#ifndef NDEBUG
+    int reschedule_count = 1;
+#endif /* !NDEBUG */
   };
 
   void GenerateFlushRequest(const autovector<ColumnFamilyData*>& cfds,
@@ -2093,6 +2095,7 @@ class DBImpl : public DB {
                               Env::Priority thread_pri);
   Status BackgroundFlush(bool* madeProgress, JobContext* job_context,
                          LogBuffer* log_buffer, FlushReason* reason,
+                         bool* flush_rescheduled_to_retain_udt,
                          Env::Priority thread_pri);
 
   bool EnoughRoomForCompaction(ColumnFamilyData* cfd,
@@ -2104,6 +2107,12 @@ class DBImpl : public DB {
   bool RequestCompactionToken(ColumnFamilyData* cfd, bool force,
                               std::unique_ptr<TaskLimiterToken>* token,
                               LogBuffer* log_buffer);
+
+  // Return true if the `FlushRequest` can be rescheduled to retain the UDT.
+  // Only true if there are user-defined timestamps in the involved MemTables
+  // with newer than cutoff timestamp `full_history_ts_low` and not flushing
+  // immediately will not cause entering write stall mode.
+  bool ShouldRescheduleFlushRequestToRetainUDT(const FlushRequest& flush_req);
 
   // Schedule background tasks
   Status StartPeriodicTaskScheduler();
@@ -2191,7 +2200,7 @@ class DBImpl : public DB {
   void BuildCompactionJobInfo(const ColumnFamilyData* cfd, Compaction* c,
                               const Status& st,
                               const CompactionJobStats& compaction_job_stats,
-                              const int job_id, const Version* current,
+                              const int job_id,
                               CompactionJobInfo* compaction_job_info) const;
   // Reserve the next 'num' file numbers for to-be-ingested external SST files,
   // and return the current file_number in 'next_file_number'.

@@ -51,7 +51,8 @@ class GenerateLevelFilesBriefTest : public testing::Test {
         largest_seq, /* marked_for_compact */ false, Temperature::kUnknown,
         kInvalidBlobFileNumber, kUnknownOldestAncesterTime,
         kUnknownFileCreationTime, kUnknownEpochNumber, kUnknownFileChecksum,
-        kUnknownFileChecksumFuncName, kNullUniqueId64x2, 0, 0);
+        kUnknownFileChecksumFuncName, kNullUniqueId64x2, 0, 0,
+        /* user_defined_timestamps_persisted */ true);
     files_.push_back(f);
   }
 
@@ -163,7 +164,8 @@ class VersionStorageInfoTestBase : public testing::Test {
         Temperature::kUnknown, oldest_blob_file_number,
         kUnknownOldestAncesterTime, kUnknownFileCreationTime,
         kUnknownEpochNumber, kUnknownFileChecksum, kUnknownFileChecksumFuncName,
-        kNullUniqueId64x2, compensated_range_deletion_size, 0);
+        kNullUniqueId64x2, compensated_range_deletion_size, 0,
+        /* user_defined_timestamps_persisted */ true);
     vstorage_.AddFile(level, f);
   }
 
@@ -1347,6 +1349,8 @@ class VersionSetTestBase {
     new_cf.SetColumnFamily(new_id);
     new_cf.SetLogNumber(0);
     new_cf.SetComparatorName(cf_options.comparator->Name());
+    new_cf.SetPersistUserDefinedTimestamps(
+        cf_options.persist_user_defined_timestamps);
     Status s;
     mutex_.Lock();
     s = versions_->LogAndApply(/*column_family_data=*/nullptr,
@@ -3292,11 +3296,11 @@ class VersionSetTestMissingFiles : public VersionSetTestBase,
       s = fs_->GetFileSize(fname, IOOptions(), &file_size, nullptr);
       ASSERT_OK(s);
       ASSERT_NE(0, file_size);
-      file_metas->emplace_back(file_num, /*file_path_id=*/0, file_size, ikey,
-                               ikey, 0, 0, false, Temperature::kUnknown, 0, 0,
-                               0, info.epoch_number, kUnknownFileChecksum,
-                               kUnknownFileChecksumFuncName, kNullUniqueId64x2,
-                               0, 0);
+      file_metas->emplace_back(
+          file_num, /*file_path_id=*/0, file_size, ikey, ikey, 0, 0, false,
+          Temperature::kUnknown, 0, 0, 0, info.epoch_number,
+          kUnknownFileChecksum, kUnknownFileChecksumFuncName, kNullUniqueId64x2,
+          0, 0, /* user_defined_timestamps_persisted */ true);
     }
   }
 
@@ -3318,7 +3322,7 @@ class VersionSetTestMissingFiles : public VersionSetTestBase,
     ++last_seqno_;
     assert(log_writer_.get() != nullptr);
     std::string record;
-    ASSERT_TRUE(edit.EncodeTo(&record));
+    ASSERT_TRUE(edit.EncodeTo(&record, 0 /* ts_sz */));
     Status s = log_writer_->AddRecord(record);
     ASSERT_OK(s);
   }
@@ -3353,7 +3357,8 @@ TEST_F(VersionSetTestMissingFiles, ManifestFarBehindSst) {
         file_num, /*file_path_id=*/0, /*file_size=*/12, smallest_ikey,
         largest_ikey, 0, 0, false, Temperature::kUnknown, 0, 0, 0,
         file_num /* epoch_number */, kUnknownFileChecksum,
-        kUnknownFileChecksumFuncName, kNullUniqueId64x2, 0, 0);
+        kUnknownFileChecksumFuncName, kNullUniqueId64x2, 0, 0,
+        /* user_defined_timestamps_persisted */ true);
     added_files.emplace_back(0, meta);
   }
   WriteFileAdditionAndDeletionToManifest(
@@ -3414,7 +3419,8 @@ TEST_F(VersionSetTestMissingFiles, ManifestAheadofSst) {
         file_num, /*file_path_id=*/0, /*file_size=*/12, smallest_ikey,
         largest_ikey, 0, 0, false, Temperature::kUnknown, 0, 0, 0,
         file_num /* epoch_number */, kUnknownFileChecksum,
-        kUnknownFileChecksumFuncName, kNullUniqueId64x2, 0, 0);
+        kUnknownFileChecksumFuncName, kNullUniqueId64x2, 0, 0,
+        /* user_defined_timestamps_persisted */ true);
     added_files.emplace_back(0, meta);
   }
   WriteFileAdditionAndDeletionToManifest(
@@ -3547,6 +3553,7 @@ INSTANTIATE_TEST_CASE_P(
 
 TEST_P(ChargeFileMetadataTestWithParam, Basic) {
   Options options;
+  options.level_compaction_dynamic_level_bytes = false;
   BlockBasedTableOptions table_options;
   CacheEntryRoleOptions::Decision charge_file_metadata = GetParam();
   table_options.cache_usage_options.options_overrides.insert(

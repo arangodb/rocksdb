@@ -3273,6 +3273,142 @@ TEST_F(UpdateFullHistoryTsLowTest, ConcurrentUpdate) {
   Close();
 }
 
+// Tests the effect of flag `persist_user_defined_timestamps` on the file
+// boundaries contained in the Manifest, a.k.a FileMetaData.smallest,
+// FileMetaData.largest.
+class HandleFileBoundariesTest
+    : public DBBasicTestWithTimestampBase,
+      public testing::WithParamInterface<test::UserDefinedTimestampTestMode> {
+ public:
+  HandleFileBoundariesTest()
+      : DBBasicTestWithTimestampBase("/handle_file_boundaries") {}
+};
+
+TEST_P(HandleFileBoundariesTest, ConfigurePersistUdt) {
+  Options options = CurrentOptions();
+  options.env = env_;
+  // Write a timestamp that is not the min timestamp to help test the behavior
+  // of flag `persist_user_defined_timestamps`.
+  std::string write_ts;
+  std::string min_ts;
+  PutFixed64(&write_ts, 1);
+  PutFixed64(&min_ts, 0);
+  std::string smallest_ukey_without_ts = "bar";
+  std::string largest_ukey_without_ts = "foo";
+  options.comparator = test::BytewiseComparatorWithU64TsWrapper();
+  bool persist_udt = test::ShouldPersistUDT(GetParam());
+  options.persist_user_defined_timestamps = persist_udt;
+  if (!persist_udt) {
+    options.allow_concurrent_memtable_write = false;
+  }
+  DestroyAndReopen(options);
+
+  ASSERT_OK(
+      db_->Put(WriteOptions(), smallest_ukey_without_ts, write_ts, "val1"));
+  ASSERT_OK(
+      db_->Put(WriteOptions(), largest_ukey_without_ts, write_ts, "val2"));
+
+  // Create a L0 SST file and its record is added to the Manfiest.
+  ASSERT_OK(Flush());
+  Close();
+
+  options.create_if_missing = false;
+  // Reopen the DB and process manifest file.
+  Reopen(options);
+
+  std::vector<std::vector<FileMetaData>> level_to_files;
+  dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
+                                  &level_to_files);
+  ASSERT_GT(level_to_files.size(), 1);
+  // L0 only has one SST file.
+  ASSERT_EQ(level_to_files[0].size(), 1);
+  auto file_meta = level_to_files[0][0];
+  if (persist_udt) {
+    ASSERT_EQ(smallest_ukey_without_ts + write_ts,
+              file_meta.smallest.user_key());
+    ASSERT_EQ(largest_ukey_without_ts + write_ts, file_meta.largest.user_key());
+  } else {
+    // If `persist_user_defined_timestamps` is false, the file boundaries should
+    // have the min timestamp. Behind the scenes, when file boundaries in
+    // FileMetaData is persisted to Manifest, the original user-defined
+    // timestamps in user key are stripped. When manifest is read and processed
+    // during DB open, a min timestamp is padded to the file boundaries. This
+    // test's writes contain non min timestamp to verify this logic end-to-end.
+    ASSERT_EQ(smallest_ukey_without_ts + min_ts, file_meta.smallest.user_key());
+    ASSERT_EQ(largest_ukey_without_ts + min_ts, file_meta.largest.user_key());
+  }
+  Close();
+}
+
+INSTANTIATE_TEST_CASE_P(
+    ConfigurePersistUdt, HandleFileBoundariesTest,
+    ::testing::Values(
+        test::UserDefinedTimestampTestMode::kStripUserDefinedTimestamp,
+        test::UserDefinedTimestampTestMode::kNormal));
+
+TEST_F(DBBasicTestWithTimestamp, EnableDisableUDT) {
+  Options options = CurrentOptions();
+  options.env = env_;
+  // Create a column family without user-defined timestamps.
+  options.comparator = BytewiseComparator();
+  options.persist_user_defined_timestamps = true;
+  DestroyAndReopen(options);
+
+  // Create one SST file, its user keys have no user-defined timestamps.
+  ASSERT_OK(db_->Put(WriteOptions(), "foo", "val1"));
+  ASSERT_OK(Flush(0));
+  Close();
+
+  // Reopen the existing column family and enable user-defined timestamps
+  // feature for it.
+  options.comparator = test::BytewiseComparatorWithU64TsWrapper();
+  options.persist_user_defined_timestamps = false;
+  options.allow_concurrent_memtable_write = false;
+  Reopen(options);
+
+  std::string value;
+  ASSERT_TRUE(db_->Get(ReadOptions(), "foo", &value).IsInvalidArgument());
+  std::string read_ts;
+  PutFixed64(&read_ts, 0);
+  ReadOptions ropts;
+  Slice read_ts_slice = read_ts;
+  ropts.timestamp = &read_ts_slice;
+  std::string key_ts;
+  // Entries in pre-existing SST files are treated as if they have minimum
+  // user-defined timestamps.
+  ASSERT_OK(db_->Get(ropts, "foo", &value, &key_ts));
+  ASSERT_EQ("val1", value);
+  ASSERT_EQ(read_ts, key_ts);
+
+  // Do timestamped read / write.
+  std::string write_ts;
+  PutFixed64(&write_ts, 1);
+  ASSERT_OK(db_->Put(WriteOptions(), "foo", write_ts, "val2"));
+  read_ts.clear();
+  PutFixed64(&read_ts, 1);
+  ASSERT_OK(db_->Get(ropts, "foo", &value, &key_ts));
+  ASSERT_EQ("val2", value);
+  ASSERT_EQ(write_ts, key_ts);
+  // The user keys in this SST file don't have user-defined timestamps either,
+  // because `persist_user_defined_timestamps` flag is set to false.
+  ASSERT_OK(Flush(0));
+  Close();
+
+  // Reopen the existing column family while disabling user-defined timestamps.
+  options.comparator = BytewiseComparator();
+  Reopen(options);
+
+  ASSERT_TRUE(db_->Get(ropts, "foo", &value).IsInvalidArgument());
+  ASSERT_OK(db_->Get(ReadOptions(), "foo", &value));
+  ASSERT_EQ("val2", value);
+
+  // Continue to write / read the column family without user-defined timestamps.
+  ASSERT_OK(db_->Put(WriteOptions(), "foo", "val3"));
+  ASSERT_OK(db_->Get(ReadOptions(), "foo", &value));
+  ASSERT_EQ("val3", value);
+  Close();
+}
+
 TEST_F(DBBasicTestWithTimestamp,
        GCPreserveRangeTombstoneWhenNoOrSmallFullHistoryLow) {
   Options options = CurrentOptions();

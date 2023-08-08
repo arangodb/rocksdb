@@ -490,10 +490,28 @@ struct DBOptions {
 
   // If true, during memtable flush, RocksDB will validate total entries
   // read in flush, and compare with counter inserted into it.
+  //
   // The option is here to turn the feature off in case this new validation
-  // feature has a bug.
+  // feature has a bug. The option may be removed in the future once the
+  // feature is stable.
+  //
   // Default: true
   bool flush_verify_memtable_count = true;
+
+  // If true, during compaction, RocksDB will count the number of entries
+  // read and compare it against the number of entries in the compaction
+  // input files. This is intended to add protection against corruption
+  // during compaction. Note that
+  // - this verification is not done for compactions during which a compaction
+  // filter returns kRemoveAndSkipUntil, and
+  // - the number of range deletions is not verified.
+  //
+  // The option is here to turn the feature off in case this new validation
+  // feature has a bug. The option may be removed in the future once the
+  // feature is stable.
+  //
+  // Default: true
+  bool compaction_verify_record_count = true;
 
   // If true, the log numbers and sizes of the synced WALs are tracked
   // in MANIFEST. During DB recovery, if a synced WAL is missing
@@ -1071,7 +1089,7 @@ struct DBOptions {
   //
   // By default, i.e., when it is false, rocksdb does not advance the sequence
   // number for new snapshots unless all the writes with lower sequence numbers
-  // are already finished. This provides the immutability that we except from
+  // are already finished. This provides the immutability that we expect from
   // snapshots. Moreover, since Iterator and MultiGet internally depend on
   // snapshots, the snapshot immutability results into Iterator and MultiGet
   // offering consistent-point-in-time view. If set to true, although
@@ -1157,7 +1175,7 @@ struct DBOptions {
 
   // A global cache for table-level rows.
   // Default: nullptr (disabled)
-  std::shared_ptr<GeneralCache> row_cache = nullptr;
+  std::shared_ptr<RowCache> row_cache = nullptr;
 
   // A filter object supplied to be invoked while processing write-ahead-logs
   // (WALs) during recovery. The filter provides a way to inspect log
@@ -1198,11 +1216,11 @@ struct DBOptions {
   // Set this option to true during creation of database if you want
   // to be able to ingest behind (call IngestExternalFile() skipping keys
   // that already exist, rather than overwriting matching keys).
-  // Setting this option to true will affect 2 things:
-  // 1) Disable some internal optimizations around SST file compression
-  // 2) Reserve bottom-most level for ingested files only.
-  // Note that only universal compaction supports reserving last level
-  // for file ingestion only.
+  // Setting this option to true has the following effects:
+  // 1) Disable some internal optimizations around SST file compression.
+  // 2) Reserve the last level for ingested files only.
+  // 3) Compaction will not include any file from the last level.
+  // Note that only Universal Compaction supports allow_ingest_behind.
   // `num_levels` should be >= 3 if this option is turned on.
   //
   //
@@ -1817,15 +1835,18 @@ struct CompactionOptions {
 // For level based compaction, we can configure if we want to skip/force
 // bottommost level compaction.
 enum class BottommostLevelCompaction {
-  // Skip bottommost level compaction
+  // Skip bottommost level compaction.
   kSkip,
-  // Only compact bottommost level if there is a compaction filter
-  // This is the default option
+  // Only compact bottommost level if there is a compaction filter.
+  // This is the default option.
+  // Similar to kForceOptimized, when compacting bottommost level, avoid
+  // double-compacting files
+  // created in the same manual compaction.
   kIfHaveCompactionFilter,
-  // Always compact bottommost level
+  // Always compact bottommost level.
   kForce,
   // Always compact bottommost level but in bottommost level avoid
-  // double-compacting files created in the same compaction
+  // double-compacting files created in the same compaction.
   kForceOptimized,
 };
 
@@ -2082,6 +2103,18 @@ struct LiveFilesStorageInfoOptions {
   // Include all wal files (also archived ones). This might be useful if the
   // application wants to consume the wal files later on.
   bool include_all_wal_files = false;
+};
+
+struct WaitForCompactOptions {
+  // A boolean to abort waiting in case of a pause (PauseBackgroundWork()
+  // called) If true, Status::Aborted will be returned immediately. If false,
+  // ContinueBackgroundWork() must be called to resume the background jobs.
+  // Otherwise, jobs that were queued, but not scheduled yet may never finish
+  // and WaitForCompact() may wait indefinitely.
+  bool abort_on_pause = false;
+
+  // A boolean to flush all column families before starting to wait.
+  bool flush = false;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

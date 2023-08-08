@@ -570,7 +570,8 @@ Status BlockBasedTable::Open(
     TailPrefetchStats* tail_prefetch_stats,
     BlockCacheTracer* const block_cache_tracer,
     size_t max_file_size_for_l0_meta_pin, const std::string& cur_db_session_id,
-    uint64_t cur_file_num, UniqueId64x2 expected_unique_id) {
+    uint64_t cur_file_num, UniqueId64x2 expected_unique_id,
+    const bool user_defined_timestamps_persisted) {
   table_reader->reset();
 
   Status s;
@@ -631,9 +632,9 @@ Status BlockBasedTable::Open(
   }
 
   BlockCacheLookupContext lookup_context{TableReaderCaller::kPrefetch};
-  Rep* rep = new BlockBasedTable::Rep(ioptions, env_options, table_options,
-                                      internal_comparator, skip_filters,
-                                      file_size, level, immortal_table);
+  Rep* rep = new BlockBasedTable::Rep(
+      ioptions, env_options, table_options, internal_comparator, skip_filters,
+      file_size, level, immortal_table, user_defined_timestamps_persisted);
   rep->file = std::move(file);
   rep->footer = footer;
 
@@ -763,12 +764,14 @@ Status BlockBasedTable::Open(
       PersistentCacheOptions(rep->table_options.persistent_cache,
                              rep->base_cache_key, rep->ioptions.stats);
 
+  // TODO(yuzhangyu): handle range deletion entries for UDT in memtable only.
   s = new_table->ReadRangeDelBlock(ro, prefetch_buffer.get(),
                                    metaindex_iter.get(), internal_comparator,
                                    &lookup_context);
   if (!s.ok()) {
     return s;
   }
+  rep->verify_checksum_set_on_open = ro.verify_checksums;
   s = new_table->PrefetchIndexAndFilterBlocks(
       ro, prefetch_buffer.get(), metaindex_iter.get(), new_table.get(),
       prefetch_all, table_options, level, file_size,
@@ -828,10 +831,7 @@ Status BlockBasedTable::PrefetchTail(
       // index/filter is enabled and top-level partition pinning is enabled.
       // That's because we need to issue readahead before we read the
       // properties, at which point we don't yet know the index type.
-      tail_prefetch_size =
-          prefetch_all || preload_all
-              ? static_cast<size_t>(4 * 1024 + 0.01 * file_size)
-              : 4 * 1024;
+      tail_prefetch_size = prefetch_all || preload_all ? 512 * 1024 : 4 * 1024;
 
       ROCKS_LOG_WARN(logger,
                      "Tail prefetch size %zu is calculated based on heuristics",
@@ -852,8 +852,13 @@ Status BlockBasedTable::PrefetchTail(
     prefetch_off = static_cast<size_t>(file_size - tail_prefetch_size);
     prefetch_len = tail_prefetch_size;
   }
+
+#ifndef NDEBUG
+  std::pair<size_t*, size_t*> prefetch_off_len_pair = {&prefetch_off,
+                                                       &prefetch_len};
   TEST_SYNC_POINT_CALLBACK("BlockBasedTable::Open::TailPrefetchLen",
-                           &tail_prefetch_size);
+                           &prefetch_off_len_pair);
+#endif  // NDEBUG
 
   // Try file system prefetch
   if (!file->use_direct_io() && !force_direct_prefetch) {
@@ -1456,7 +1461,8 @@ DataBlockIter* BlockBasedTable::InitBlockIterator<DataBlockIter>(
     DataBlockIter* input_iter, bool block_contents_pinned) {
   return block->NewDataIterator(rep->internal_comparator.user_comparator(),
                                 rep->get_global_seqno(block_type), input_iter,
-                                rep->ioptions.stats, block_contents_pinned);
+                                rep->ioptions.stats, block_contents_pinned,
+                                rep->user_defined_timestamps_persisted);
 }
 
 // TODO?
@@ -1469,7 +1475,7 @@ IndexBlockIter* BlockBasedTable::InitBlockIterator<IndexBlockIter>(
       rep->get_global_seqno(block_type), input_iter, rep->ioptions.stats,
       /* total_order_seek */ true, rep->index_has_first_key,
       rep->index_key_includes_seq, rep->index_value_is_full,
-      block_contents_pinned);
+      block_contents_pinned, rep->user_defined_timestamps_persisted);
 }
 
 // If contents is nullptr, this function looks up the block caches for the
@@ -2449,6 +2455,10 @@ BlockType BlockBasedTable::GetBlockTypeForMetaBlockByName(
     return BlockType::kHashIndexMetadata;
   }
 
+  if (meta_block_name == kIndexBlockName) {
+    return BlockType::kIndex;
+  }
+
   if (meta_block_name.starts_with(kObsoleteFilterBlockPrefix)) {
     // Obsolete but possible in old files
     return BlockType::kInvalid;
@@ -2469,6 +2479,9 @@ Status BlockBasedTable::VerifyChecksumInMetaBlocks(
     BlockHandle handle;
     Slice input = index_iter->value();
     s = handle.DecodeFrom(&input);
+    if (!s.ok()) {
+      break;
+    }
     BlockContents contents;
     const Slice meta_block_name = index_iter->key();
     if (meta_block_name == kPropertiesBlockName) {
@@ -2479,7 +2492,13 @@ Status BlockBasedTable::VerifyChecksumInMetaBlocks(
                                     nullptr /* prefetch_buffer */, rep_->footer,
                                     rep_->ioptions, &table_properties,
                                     nullptr /* memory_allocator */);
+    } else if (rep_->verify_checksum_set_on_open &&
+               meta_block_name == kIndexBlockName) {
+      // WART: For now, to maintain similar I/O behavior as before
+      // format_version=6, we skip verifying index block checksum--but only
+      // if it was checked on open.
     } else {
+      // FIXME? Need to verify checksums of index and filter partitions?
       s = BlockFetcher(
               rep_->file.get(), nullptr /* prefetch buffer */, rep_->footer,
               read_options, handle, &contents, rep_->ioptions,
@@ -2537,6 +2556,15 @@ Status BlockBasedTable::CreateIndexReader(
     InternalIterator* meta_iter, bool use_cache, bool prefetch, bool pin,
     BlockCacheLookupContext* lookup_context,
     std::unique_ptr<IndexReader>* index_reader) {
+  if (FormatVersionUsesIndexHandleInFooter(rep_->footer.format_version())) {
+    rep_->index_handle = rep_->footer.index_handle();
+  } else {
+    Status s = FindMetaBlock(meta_iter, kIndexBlockName, &rep_->index_handle);
+    if (!s.ok()) {
+      return s;
+    }
+  }
+
   switch (rep_->index_type) {
     case BlockBasedTableOptions::kTwoLevelIndexSearch: {
       return PartitionIndexReader::Create(this, ro, prefetch_buffer, use_cache,
@@ -2704,7 +2732,7 @@ bool BlockBasedTable::TEST_FilterBlockInCache() const {
 bool BlockBasedTable::TEST_IndexBlockInCache() const {
   assert(rep_ != nullptr);
 
-  return TEST_BlockInCache(rep_->footer.index_handle());
+  return TEST_BlockInCache(rep_->index_handle);
 }
 
 Status BlockBasedTable::GetKVPairsFromDataBlocks(

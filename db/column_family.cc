@@ -382,8 +382,9 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
 
   const uint64_t kAdjustedTtl = 30 * 24 * 60 * 60;
   if (result.ttl == kDefaultTtl) {
-    if (is_block_based_table &&
-        result.compaction_style != kCompactionStyleFIFO) {
+    if (is_block_based_table) {
+      // FIFO also requires max_open_files=-1, which is checked in
+      // ValidateOptions().
       result.ttl = kAdjustedTtl;
     } else {
       result.ttl = 0;
@@ -391,40 +392,35 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
   }
 
   const uint64_t kAdjustedPeriodicCompSecs = 30 * 24 * 60 * 60;
-
-  // Turn on periodic compactions and set them to occur once every 30 days if
-  // compaction filters are used and periodic_compaction_seconds is set to the
-  // default value.
-  if (result.compaction_style != kCompactionStyleFIFO) {
+  if (result.compaction_style == kCompactionStyleLevel) {
     if ((result.compaction_filter != nullptr ||
          result.compaction_filter_factory != nullptr) &&
         result.periodic_compaction_seconds == kDefaultPeriodicCompSecs &&
         is_block_based_table) {
       result.periodic_compaction_seconds = kAdjustedPeriodicCompSecs;
     }
-  } else {
-    // result.compaction_style == kCompactionStyleFIFO
-    if (result.ttl == 0) {
-      if (is_block_based_table) {
-        if (result.periodic_compaction_seconds == kDefaultPeriodicCompSecs) {
-          result.periodic_compaction_seconds = kAdjustedPeriodicCompSecs;
-        }
-        result.ttl = result.periodic_compaction_seconds;
-      }
-    } else if (result.periodic_compaction_seconds != 0) {
-      result.ttl = std::min(result.ttl, result.periodic_compaction_seconds);
+  } else if (result.compaction_style == kCompactionStyleUniversal) {
+    if (result.periodic_compaction_seconds == kDefaultPeriodicCompSecs &&
+        is_block_based_table) {
+      result.periodic_compaction_seconds = kAdjustedPeriodicCompSecs;
+    }
+  } else if (result.compaction_style == kCompactionStyleFIFO) {
+    if (result.periodic_compaction_seconds != kDefaultPeriodicCompSecs) {
+      ROCKS_LOG_WARN(
+          db_options.info_log.get(),
+          "periodic_compaction_seconds does not support FIFO compaction. You"
+          "may want to set option TTL instead.");
     }
   }
 
-  // TTL compactions would work similar to Periodic Compactions in Universal in
-  // most of the cases. So, if ttl is set, execute the periodic compaction
-  // codepath.
-  if (result.compaction_style == kCompactionStyleUniversal && result.ttl != 0) {
-    if (result.periodic_compaction_seconds != 0) {
+  // For universal compaction, `ttl` and `periodic_compaction_seconds` mean the
+  // same thing, take the stricter value.
+  if (result.compaction_style == kCompactionStyleUniversal) {
+    if (result.periodic_compaction_seconds == 0) {
+      result.periodic_compaction_seconds = result.ttl;
+    } else if (result.ttl != 0) {
       result.periodic_compaction_seconds =
           std::min(result.ttl, result.periodic_compaction_seconds);
-    } else {
-      result.periodic_compaction_seconds = result.ttl;
     }
   }
 
@@ -1245,30 +1241,11 @@ SuperVersion* ColumnFamilyData::GetThreadLocalSuperVersion(DBImpl* db) {
   // (if no Scrape happens).
   assert(ptr != SuperVersion::kSVInUse);
   SuperVersion* sv = static_cast<SuperVersion*>(ptr);
-  if (sv == SuperVersion::kSVObsolete ||
-      sv->version_number != super_version_number_.load()) {
+  if (sv == SuperVersion::kSVObsolete) {
     RecordTick(ioptions_.stats, NUMBER_SUPERVERSION_ACQUIRES);
-    SuperVersion* sv_to_delete = nullptr;
-
-    if (sv && sv->Unref()) {
-      RecordTick(ioptions_.stats, NUMBER_SUPERVERSION_CLEANUPS);
-      db->mutex()->Lock();
-      // NOTE: underlying resources held by superversion (sst files) might
-      // not be released until the next background job.
-      sv->Cleanup();
-      if (db->immutable_db_options().avoid_unnecessary_blocking_io) {
-        db->AddSuperVersionsToFreeQueue(sv);
-        db->SchedulePurge();
-      } else {
-        sv_to_delete = sv;
-      }
-    } else {
-      db->mutex()->Lock();
-    }
+    db->mutex()->Lock();
     sv = super_version_->Ref();
     db->mutex()->Unlock();
-
-    delete sv_to_delete;
   }
   assert(sv != nullptr);
   return sv;
@@ -1396,6 +1373,33 @@ Status ColumnFamilyData::ValidateOptions(
       return Status::NotSupported(
           "Periodic Compaction is only supported in "
           "Block-Based Table format. ");
+    }
+  }
+
+  const auto* ucmp = cf_options.comparator;
+  assert(ucmp);
+  if (ucmp->timestamp_size() > 0 &&
+      !cf_options.persist_user_defined_timestamps) {
+    if (db_options.atomic_flush) {
+      return Status::NotSupported(
+          "Not persisting user-defined timestamps feature is not supported"
+          "in combination with atomic flush.");
+    }
+    if (db_options.allow_concurrent_memtable_write) {
+      return Status::NotSupported(
+          "Not persisting user-defined timestamps feature is not supported"
+          " in combination with concurrent memtable write.");
+    }
+    const char* comparator_name = cf_options.comparator->Name();
+    size_t name_size = strlen(comparator_name);
+    const char* suffix = ".u64ts";
+    size_t suffix_size = strlen(suffix);
+    if (name_size <= suffix_size ||
+        strcmp(comparator_name + name_size - suffix_size, suffix) != 0) {
+      return Status::NotSupported(
+          "Not persisting user-defined timestamps"
+          "feature only support user-defined timestamps formatted as "
+          "uint64_t.");
     }
   }
 
@@ -1538,6 +1542,43 @@ FSDirectory* ColumnFamilyData::GetDataDir(size_t path_id) const {
   return data_dirs_[path_id].get();
 }
 
+bool ColumnFamilyData::ShouldPostponeFlushToRetainUDT(
+    uint64_t max_memtable_id) {
+  const Comparator* ucmp = user_comparator();
+  const size_t ts_sz = ucmp->timestamp_size();
+  if (ts_sz == 0 || ioptions_.persist_user_defined_timestamps) {
+    return false;
+  }
+  // If users set the `persist_user_defined_timestamps` flag to false, they
+  // should also set the `full_history_ts_low` flag to indicate the range of
+  // user-defined timestamps to retain in memory. Otherwise, we do not
+  // explicitly postpone flush to retain UDTs.
+  const std::string& full_history_ts_low = GetFullHistoryTsLow();
+  if (full_history_ts_low.empty()) {
+    return false;
+  }
+#ifndef NDEBUG
+  Slice last_table_newest_udt;
+#endif /* !NDEBUG */
+  for (const Slice& table_newest_udt :
+       imm()->GetTablesNewestUDT(max_memtable_id)) {
+    assert(table_newest_udt.size() == full_history_ts_low.size());
+    assert(last_table_newest_udt.empty() ||
+           ucmp->CompareTimestamp(table_newest_udt, last_table_newest_udt) >=
+               0);
+    // Checking the newest UDT contained in MemTable with ascending ID up to
+    // `max_memtable_id`. MemTable with bigger ID will have newer UDT, return
+    // immediately on finding the first MemTable that needs postponing.
+    if (ucmp->CompareTimestamp(table_newest_udt, full_history_ts_low) >= 0) {
+      return true;
+    }
+#ifndef NDEBUG
+    last_table_newest_udt = table_newest_udt;
+#endif /* !NDEBUG */
+  }
+  return false;
+}
+
 void ColumnFamilyData::RecoverEpochNumbers() {
   assert(current_);
   auto* vstorage = current_->storage_info();
@@ -1640,6 +1681,13 @@ ColumnFamilyData* ColumnFamilySet::CreateColumnFamily(
       db_id_, db_session_id_);
   column_families_.insert({name, id});
   column_family_data_.insert({id, new_cfd});
+  auto ucmp = new_cfd->user_comparator();
+  assert(ucmp);
+  size_t ts_sz = ucmp->timestamp_size();
+  running_ts_sz_.insert({id, ts_sz});
+  if (ts_sz > 0) {
+    ts_sz_for_record_.insert({id, ts_sz});
+  }
   max_column_family_ = std::max(max_column_family_, id);
   // add to linked list
   new_cfd->next_ = dummy_cfd_;
@@ -1655,10 +1703,13 @@ ColumnFamilyData* ColumnFamilySet::CreateColumnFamily(
 
 // under a DB mutex AND from a write thread
 void ColumnFamilySet::RemoveColumnFamily(ColumnFamilyData* cfd) {
-  auto cfd_iter = column_family_data_.find(cfd->GetID());
+  uint32_t cf_id = cfd->GetID();
+  auto cfd_iter = column_family_data_.find(cf_id);
   assert(cfd_iter != column_family_data_.end());
   column_family_data_.erase(cfd_iter);
   column_families_.erase(cfd->GetName());
+  running_ts_sz_.erase(cf_id);
+  ts_sz_for_record_.erase(cf_id);
 }
 
 // under a DB mutex OR from a write thread
