@@ -88,21 +88,27 @@ CacheAllocationPtr CopyBufferToHeap(MemoryAllocator* allocator, Slice& buf) {
 // Explicitly instantiate templates for each "blocklike" type we use (and
 // before implicit specialization).
 // This makes it possible to keep the template definitions in the .cc file.
-#define INSTANTIATE_RETRIEVE_BLOCK(T)                                         \
+#define INSTANTIATE_BLOCKLIKE_TEMPLATES(T)                                    \
   template Status BlockBasedTable::RetrieveBlock<T>(                          \
       FilePrefetchBuffer * prefetch_buffer, const ReadOptions& ro,            \
       const BlockHandle& handle, const UncompressionDict& uncompression_dict, \
       CachableEntry<T>* out_parsed_block, GetContext* get_context,            \
       BlockCacheLookupContext* lookup_context, bool for_compaction,           \
-      bool use_cache, bool async_read) const;
+      bool use_cache, bool async_read) const;                                 \
+  template Status BlockBasedTable::MaybeReadBlockAndLoadToCache<T>(           \
+      FilePrefetchBuffer * prefetch_buffer, const ReadOptions& ro,            \
+      const BlockHandle& handle, const UncompressionDict& uncompression_dict, \
+      bool for_compaction, CachableEntry<T>* block_entry,                     \
+      GetContext* get_context, BlockCacheLookupContext* lookup_context,       \
+      BlockContents* contents, bool async_read) const;
 
-INSTANTIATE_RETRIEVE_BLOCK(ParsedFullFilterBlock);
-INSTANTIATE_RETRIEVE_BLOCK(UncompressionDict);
-INSTANTIATE_RETRIEVE_BLOCK(Block_kData);
-INSTANTIATE_RETRIEVE_BLOCK(Block_kIndex);
-INSTANTIATE_RETRIEVE_BLOCK(Block_kFilterPartitionIndex);
-INSTANTIATE_RETRIEVE_BLOCK(Block_kRangeDeletion);
-INSTANTIATE_RETRIEVE_BLOCK(Block_kMetaIndex);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(ParsedFullFilterBlock);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(UncompressionDict);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(Block_kData);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(Block_kIndex);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(Block_kFilterPartitionIndex);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(Block_kRangeDeletion);
+INSTANTIATE_BLOCKLIKE_TEMPLATES(Block_kMetaIndex);
 
 }  // namespace ROCKSDB_NAMESPACE
 
@@ -860,10 +866,11 @@ Status BlockBasedTable::PrefetchTail(
                            &prefetch_off_len_pair);
 #endif  // NDEBUG
 
+  IOOptions opts;
+  Status s = file->PrepareIOOptions(ro, opts);
   // Try file system prefetch
-  if (!file->use_direct_io() && !force_direct_prefetch) {
-    if (!file->Prefetch(prefetch_off, prefetch_len, ro.rate_limiter_priority)
-             .IsNotSupported()) {
+  if (s.ok() && !file->use_direct_io() && !force_direct_prefetch) {
+    if (!file->Prefetch(opts, prefetch_off, prefetch_len).IsNotSupported()) {
       prefetch_buffer->reset(new FilePrefetchBuffer(
           0 /* readahead_size */, 0 /* max_readahead_size */,
           false /* enable */, true /* track_min_offset */));
@@ -876,15 +883,11 @@ Status BlockBasedTable::PrefetchTail(
       0 /* readahead_size */, 0 /* max_readahead_size */, true /* enable */,
       true /* track_min_offset */, false /* implicit_auto_readahead */,
       0 /* num_file_reads */, 0 /* num_file_reads_for_auto_readahead */,
-      nullptr /* fs */, nullptr /* clock */, stats,
+      0 /* upper_bound_offset */, nullptr /* fs */, nullptr /* clock */, stats,
       FilePrefetchBufferUsage::kTableOpenPrefetchTail));
 
-  IOOptions opts;
-  Status s = file->PrepareIOOptions(ro, opts);
   if (s.ok()) {
-    s = (*prefetch_buffer)
-            ->Prefetch(opts, file, prefetch_off, prefetch_len,
-                       ro.rate_limiter_priority);
+    s = (*prefetch_buffer)->Prefetch(opts, file, prefetch_off, prefetch_len);
   }
   return s;
 }
@@ -1215,23 +1218,7 @@ Status BlockBasedTable::PrefetchIndexAndFilterBlocks(
   return s;
 }
 
-void BlockBasedTable::SetupForCompaction() {
-  switch (rep_->ioptions.access_hint_on_compaction_start) {
-    case Options::NONE:
-      break;
-    case Options::NORMAL:
-      rep_->file->file()->Hint(FSRandomAccessFile::kNormal);
-      break;
-    case Options::SEQUENTIAL:
-      rep_->file->file()->Hint(FSRandomAccessFile::kSequential);
-      break;
-    case Options::WILLNEED:
-      rep_->file->file()->Hint(FSRandomAccessFile::kWillNeed);
-      break;
-    default:
-      assert(false);
-  }
-}
+void BlockBasedTable::SetupForCompaction() {}
 
 std::shared_ptr<const TableProperties> BlockBasedTable::GetTableProperties()
     const {

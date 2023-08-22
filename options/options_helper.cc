@@ -210,6 +210,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
       moptions.memtable_protection_bytes_per_key;
   cf_opts->block_protection_bytes_per_key =
       moptions.block_protection_bytes_per_key;
+  cf_opts->bottommost_file_compaction_delay =
+      moptions.bottommost_file_compaction_delay;
 
   // Compaction related options
   cf_opts->disable_auto_compactions = moptions.disable_auto_compactions;
@@ -272,6 +274,7 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
   cf_opts->compression_per_level = moptions.compression_per_level;
   cf_opts->last_level_temperature = moptions.last_level_temperature;
   cf_opts->bottommost_temperature = moptions.last_level_temperature;
+  cf_opts->memtable_max_range_deletions = moptions.memtable_max_range_deletions;
 }
 
 void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
@@ -314,6 +317,7 @@ void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
       ioptions.preserve_internal_time_seconds;
   cf_opts->persist_user_defined_timestamps =
       ioptions.persist_user_defined_timestamps;
+  cf_opts->default_temperature = ioptions.default_temperature;
 
   // TODO(yhchiang): find some way to handle the following derived options
   // * max_file_size

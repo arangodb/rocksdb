@@ -129,11 +129,20 @@ std::shared_ptr<Cache> StressTest::NewCache(size_t capacity,
   if (FLAGS_cache_type == "clock_cache") {
     fprintf(stderr, "Old clock cache implementation has been removed.\n");
     exit(1);
-  } else if (FLAGS_cache_type == "hyper_clock_cache") {
-    HyperClockCacheOptions opts(static_cast<size_t>(capacity),
-                                FLAGS_block_size /*estimated_entry_charge*/,
+  } else if (EndsWith(FLAGS_cache_type, "hyper_clock_cache")) {
+    size_t estimated_entry_charge;
+    if (FLAGS_cache_type == "fixed_hyper_clock_cache" ||
+        FLAGS_cache_type == "hyper_clock_cache") {
+      estimated_entry_charge = FLAGS_block_size;
+    } else if (FLAGS_cache_type == "auto_hyper_clock_cache") {
+      estimated_entry_charge = 0;
+    } else {
+      fprintf(stderr, "Cache type not supported.");
+      exit(1);
+    }
+    HyperClockCacheOptions opts(FLAGS_cache_size, estimated_entry_charge,
                                 num_shard_bits);
-    opts.secondary_cache = std::move(secondary_cache);
+    opts.hash_seed = BitwiseAnd(FLAGS_seed, INT32_MAX);
     return opts.MakeSharedCache();
   } else if (FLAGS_cache_type == "lru_cache") {
     LRUCacheOptions opts;
@@ -490,7 +499,6 @@ void StressTest::PreloadDbAndReopenAsReadOnly(int64_t number_of_keys,
 
       const Slice v(value, sz);
 
-
       std::string ts;
       if (FLAGS_user_timestamp_size > 0) {
         ts = GetNowNanos();
@@ -695,6 +703,7 @@ Status StressTest::ExecuteTransaction(
     std::function<Status(Transaction&)>&& ops) {
   std::unique_ptr<Transaction> txn;
   Status s = NewTxn(write_opts, &txn);
+  std::string try_again_messages;
   if (s.ok()) {
     for (int tries = 1;; ++tries) {
       s = ops(*txn);
@@ -705,11 +714,21 @@ Status StressTest::ExecuteTransaction(
         }
       }
       // Optimistic txn might return TryAgain, in which case rollback
-      // and try again. But that shouldn't happen too many times in a row.
+      // and try again.
       if (!s.IsTryAgain() || !FLAGS_use_optimistic_txn) {
         break;
       }
-      if (tries >= 5) {
+      // Record and report historical TryAgain messages for debugging
+      try_again_messages +=
+          std::to_string(SystemClock::Default()->NowMicros() / 1000);
+      try_again_messages += "ms ";
+      try_again_messages += s.getState();
+      try_again_messages += "\n";
+      // In theory, each Rollback after TryAgain should have an independent
+      // chance of success, so too many retries could indicate something is
+      // not working properly.
+      if (tries >= 10) {
+        s = Status::TryAgain(try_again_messages);
         break;
       }
       s = txn->Rollback();
@@ -929,9 +948,25 @@ void StressTest::OperateDb(ThreadState* thread) {
       }
 
       if (thread->rand.OneInOpt(FLAGS_verify_checksum_one_in)) {
+        ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
+        ThreadStatusUtil::SetThreadOperation(
+            ThreadStatus::OperationType::OP_VERIFY_DB_CHECKSUM);
         Status status = db_->VerifyChecksum();
+        ThreadStatusUtil::ResetThreadStatus();
         if (!status.ok()) {
           VerificationAbort(shared, "VerifyChecksum status not OK", status);
+        }
+      }
+
+      if (thread->rand.OneInOpt(FLAGS_verify_file_checksums_one_in)) {
+        ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
+        ThreadStatusUtil::SetThreadOperation(
+            ThreadStatus::OperationType::OP_VERIFY_FILE_CHECKSUMS);
+        Status status = db_->VerifyFileChecksums(read_opts);
+        ThreadStatusUtil::ResetThreadStatus();
+        if (!status.ok()) {
+          VerificationAbort(shared, "VerifyFileChecksums status not OK",
+                            status);
         }
       }
 
@@ -1034,10 +1069,18 @@ void StressTest::OperateDb(ThreadState* thread) {
           // If its the last iteration, ensure that multiget_batch_size is 1
           multiget_batch_size = std::max(multiget_batch_size, 1);
           rand_keys = GenerateNKeys(thread, multiget_batch_size, i);
+          ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
+          ThreadStatusUtil::SetThreadOperation(
+              ThreadStatus::OperationType::OP_MULTIGET);
           TestMultiGet(thread, read_opts, rand_column_families, rand_keys);
+          ThreadStatusUtil::ResetThreadStatus();
           i += multiget_batch_size - 1;
         } else {
+          ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
+          ThreadStatusUtil::SetThreadOperation(
+              ThreadStatus::OperationType::OP_GET);
           TestGet(thread, read_opts, rand_column_families, rand_keys);
+          ThreadStatusUtil::ResetThreadStatus();
         }
       } else if (prob_op < prefix_bound) {
         assert(static_cast<int>(FLAGS_readpercent) <= prob_op);
@@ -1066,8 +1109,12 @@ void StressTest::OperateDb(ThreadState* thread) {
         if (!FLAGS_skip_verifydb &&
             thread->rand.OneInOpt(
                 FLAGS_verify_iterator_with_expected_state_one_in)) {
+          ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
+          ThreadStatusUtil::SetThreadOperation(
+              ThreadStatus::OperationType::OP_DBITERATOR);
           TestIterateAgainstExpected(thread, read_opts, rand_column_families,
                                      rand_keys);
+          ThreadStatusUtil::ResetThreadStatus();
         } else {
           int num_seeks = static_cast<int>(std::min(
               std::max(static_cast<uint64_t>(thread->rand.Uniform(4)),
@@ -1076,7 +1123,11 @@ void StressTest::OperateDb(ThreadState* thread) {
                        static_cast<uint64_t>(1))));
           rand_keys = GenerateNKeys(thread, num_seeks, i);
           i += num_seeks - 1;
+          ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
+          ThreadStatusUtil::SetThreadOperation(
+              ThreadStatus::OperationType::OP_DBITERATOR);
           TestIterate(thread, read_opts, rand_column_families, rand_keys);
+          ThreadStatusUtil::ResetThreadStatus();
         }
       } else {
         assert(iterate_bound <= prob_op);
@@ -3155,6 +3206,9 @@ void InitializeOptionsFromFlags(
         "cannot be used because ZSTD 1.4.5+ is not linked with the binary."
         " zstd dictionary trainer will be used.\n");
   }
+  if (FLAGS_compression_checksum) {
+    options.compression_opts.checksum = true;
+  }
   options.max_manifest_file_size = FLAGS_max_manifest_file_size;
   options.inplace_update_support = FLAGS_in_place_update;
   options.max_subcompactions = static_cast<uint32_t>(FLAGS_subcompactions);
@@ -3278,6 +3332,11 @@ void InitializeOptionsFromFlags(
   options.allow_data_in_errors = FLAGS_allow_data_in_errors;
 
   options.enable_thread_tracking = FLAGS_enable_thread_tracking;
+
+  options.memtable_max_range_deletions = FLAGS_memtable_max_range_deletions;
+
+  options.bottommost_file_compaction_delay =
+      FLAGS_bottommost_file_compaction_delay;
 }
 
 void InitializeOptionsGeneral(

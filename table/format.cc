@@ -509,18 +509,16 @@ Status ReadFooterFromFile(const IOOptions& opts, RandomAccessFileReader* file,
   // need to pass a timeout at that point
   // TODO: rate limit footer reads.
   if (prefetch_buffer == nullptr ||
-      !prefetch_buffer->TryReadFromCache(
-          opts, file, read_offset, Footer::kMaxEncodedLength, &footer_input,
-          nullptr, opts.rate_limiter_priority)) {
+      !prefetch_buffer->TryReadFromCache(opts, file, read_offset,
+                                         Footer::kMaxEncodedLength,
+                                         &footer_input, nullptr)) {
     if (file->use_direct_io()) {
       s = file->Read(opts, read_offset, Footer::kMaxEncodedLength,
-                     &footer_input, nullptr, &internal_buf,
-                     opts.rate_limiter_priority);
+                     &footer_input, nullptr, &internal_buf);
     } else {
       footer_buf.reserve(Footer::kMaxEncodedLength);
       s = file->Read(opts, read_offset, Footer::kMaxEncodedLength,
-                     &footer_input, &footer_buf[0], nullptr,
-                     opts.rate_limiter_priority);
+                     &footer_input, &footer_buf[0], nullptr);
     }
     if (!s.ok()) return s;
   }
@@ -647,19 +645,25 @@ Status UncompressBlockData(const UncompressionInfo& uncompression_info,
   StopWatchNano timer(ioptions.clock,
                       ShouldReportDetailedTime(ioptions.env, ioptions.stats));
   size_t uncompressed_size = 0;
-  CacheAllocationPtr ubuf =
-      UncompressData(uncompression_info, data, size, &uncompressed_size,
-                     GetCompressFormatForVersion(format_version), allocator);
+  const char* error_msg = nullptr;
+  CacheAllocationPtr ubuf = UncompressData(
+      uncompression_info, data, size, &uncompressed_size,
+      GetCompressFormatForVersion(format_version), allocator, &error_msg);
   if (!ubuf) {
     if (!CompressionTypeSupported(uncompression_info.type())) {
-      return Status::NotSupported(
+      ret = Status::NotSupported(
           "Unsupported compression method for this build",
           CompressionTypeToString(uncompression_info.type()));
     } else {
-      return Status::Corruption(
-          "Corrupted compressed block contents",
-          CompressionTypeToString(uncompression_info.type()));
+      std::ostringstream oss;
+      oss << "Corrupted compressed block contents";
+      if (error_msg) {
+        oss << ": " << error_msg;
+      }
+      ret = Status::Corruption(
+          oss.str(), CompressionTypeToString(uncompression_info.type()));
     }
+    return ret;
   }
 
   *out_contents = BlockContents(std::move(ubuf), uncompressed_size);
