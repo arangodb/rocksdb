@@ -41,9 +41,17 @@ Status Checkpoint::Create(DB* db, Checkpoint** checkpoint_ptr) {
   return Status::OK();
 }
 
-Status Checkpoint::CreateCheckpoint(const std::string& /*checkpoint_dir*/,
-                                    uint64_t /*log_size_for_flush*/,
-                                    uint64_t* /*sequence_number_ptr*/) {
+Status Checkpoint::CreateCheckpoint(const std::string& checkpoint_dir,
+                                    uint64_t log_size_for_flush,
+                                    uint64_t* sequence_number_ptr) {
+  CreateCheckpointOptions opts;
+  opts.log_size_for_flush = log_size_for_flush;
+  opts.sequence_number_ptr = sequence_number_ptr;
+  return CreateCheckpoint(checkpoint_dir, opts);
+}
+
+Status Checkpoint::CreateCheckpoint(const std::string& checkpoint_dir,
+                                    const CreateCheckpointOptions&) {
   return Status::NotSupported("");
 }
 
@@ -79,8 +87,7 @@ Status Checkpoint::ExportColumnFamily(
 
 // Builds an openable snapshot of RocksDB
 Status CheckpointImpl::CreateCheckpoint(const std::string& checkpoint_dir,
-                                        uint64_t log_size_for_flush,
-                                        uint64_t* sequence_number_ptr) {
+                                        const CreateCheckpointOptions& opts) {
   DBOptions db_options = db_->GetDBOptions();
 
   Status s = db_->GetEnv()->FileExists(checkpoint_dir);
@@ -113,6 +120,11 @@ Status CheckpointImpl::CreateCheckpoint(const std::string& checkpoint_dir,
   CleanStagingDirectory(full_private_path, db_options.info_log.get());
   // create snapshot directory
   s = db_->GetEnv()->CreateDir(full_private_path);
+  if (opts.include_all_wal_files) {
+    // archive file only needed if we include all wal files
+    s = db_->GetEnv()->CreateDir(full_private_path + "/archive");
+  }
+
   uint64_t sequence_number = 0;
   if (s.ok()) {
     // enable file deletions
@@ -145,7 +157,8 @@ Status CheckpointImpl::CreateCheckpoint(const std::string& checkpoint_dir,
                               full_private_path + "/" + fname, contents,
                               db_options.use_fsync);
           } /* create_file_cb */,
-          &sequence_number, log_size_for_flush);
+          &sequence_number, opts.log_size_for_flush,
+          opts.include_all_wal_files);
 
       // we copied all the files, enable file deletions
       if (disabled_file_deletions) {
@@ -172,8 +185,8 @@ Status CheckpointImpl::CreateCheckpoint(const std::string& checkpoint_dir,
   }
 
   if (s.ok()) {
-    if (sequence_number_ptr != nullptr) {
-      *sequence_number_ptr = sequence_number;
+    if (opts.sequence_number_ptr != nullptr) {
+      *opts.sequence_number_ptr = sequence_number;
     }
     // here we know that we succeeded and installed the new snapshot
     ROCKS_LOG_INFO(db_options.info_log, "Snapshot DONE. All is good");
@@ -202,12 +215,13 @@ Status CheckpointImpl::CreateCustomCheckpoint(
                          FileType type)>
         create_file_cb,
     uint64_t* sequence_number, uint64_t log_size_for_flush,
-    bool get_live_table_checksum) {
+    bool include_all_wal_files, bool get_live_table_checksum) {
   *sequence_number = db_->GetLatestSequenceNumber();
 
   LiveFilesStorageInfoOptions opts;
   opts.include_checksum_info = get_live_table_checksum;
   opts.wal_size_for_flush = log_size_for_flush;
+  opts.include_all_wal_files = include_all_wal_files;
 
   std::vector<LiveFileStorageInfo> infos;
   {
