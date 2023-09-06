@@ -62,7 +62,7 @@ struct LockMapStripe {
 
   // Locked keys mapped to the info about the transactions that locked them.
   // TODO(agiardullo): Explore performance of other data structures.
-  absl::flat_hash_map<std::string, LockInfo> keys;
+  absl::node_hash_map<std::string, LockInfo> keys;
 };
 
 // Map of #num_stripes LockMapStripes
