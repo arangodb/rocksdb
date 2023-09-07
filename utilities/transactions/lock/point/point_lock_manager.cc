@@ -62,7 +62,7 @@ struct LockMapStripe {
 
   // Locked keys mapped to the info about the transactions that locked them.
   // TODO(agiardullo): Explore performance of other data structures.
-  absl::flat_hash_map<std::string, LockInfo> keys;
+  absl::node_hash_map<std::string, LockInfo> keys;
 };
 
 // Map of #num_stripes LockMapStripes
@@ -553,6 +553,12 @@ void PointLockManager::UnLockKey(PessimisticTransaction* txn,
     if (txn_it != txns.end()) {
       if (txns.size() == 1) {
         stripe->keys.erase(stripe_iter);
+        if (stripe->keys.empty() && stripe->keys.capacity() >= 16'384) {
+          // If the stripe is empty after the deletion, we take the
+          // time to do a rehash of the stripe map. This reclaims the
+          // underlying container's memory.
+          stripe->keys.rehash(0);
+        }
       } else {
         auto last_it = txns.end() - 1;
         if (txn_it != last_it) {
