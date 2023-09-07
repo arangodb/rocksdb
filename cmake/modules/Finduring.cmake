@@ -6,8 +6,14 @@
 
 find_path(uring_INCLUDE_DIR
   NAMES liburing.h)
-find_library(uring_LIBRARIES
-  NAMES liburing.a liburing)
+# Some linux system that used for development doesn't have static liburing package 
+if (USE_MAINTAINER_MODE)
+  find_library(uring_LIBRARIES
+    NAMES liburing.a liburing.so liburing)
+else ()
+  find_library(uring_LIBRARIES
+    NAMES liburing.a liburing)
+endif ()
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(uring
