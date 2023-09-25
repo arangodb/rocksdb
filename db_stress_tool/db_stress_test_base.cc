@@ -39,12 +39,12 @@ std::shared_ptr<const FilterPolicy> CreateFilterPolicy() {
     return BlockBasedTableOptions().filter_policy;
   }
   const FilterPolicy* new_policy;
-  if (FLAGS_ribbon_starting_level >= 999) {
+  if (FLAGS_bloom_before_level == INT_MAX) {
     // Use Bloom API
     new_policy = NewBloomFilterPolicy(FLAGS_bloom_bits, false);
   } else {
-    new_policy = NewRibbonFilterPolicy(
-        FLAGS_bloom_bits, /* bloom_before_level */ FLAGS_ribbon_starting_level);
+    new_policy =
+        NewRibbonFilterPolicy(FLAGS_bloom_bits, FLAGS_bloom_before_level);
   }
   return std::shared_ptr<const FilterPolicy>(new_policy);
 }
@@ -271,6 +271,13 @@ bool StressTest::BuildOptionsTable() {
                         std::vector<std::string>{"0", "1", "2"});
     options_tbl.emplace("prepopulate_blob_cache",
                         std::vector<std::string>{"kDisable", "kFlushOnly"});
+  }
+
+  if (FLAGS_bloom_before_level != INT_MAX) {
+    // Can modify RibbonFilterPolicy field
+    options_tbl.emplace("table_factory.filter_policy.bloom_before_level",
+                        std::vector<std::string>{"-1", "0", "1", "2",
+                                                 "2147483646", "2147483647"});
   }
 
   options_table_ = std::move(options_tbl);
@@ -747,6 +754,7 @@ void StressTest::OperateDb(ThreadState* thread) {
   read_opts.async_io = FLAGS_async_io;
   read_opts.adaptive_readahead = FLAGS_adaptive_readahead;
   read_opts.readahead_size = FLAGS_readahead_size;
+  read_opts.auto_readahead_size = FLAGS_auto_readahead_size;
   WriteOptions write_opts;
   if (FLAGS_rate_limit_auto_wal_flush) {
     write_opts.rate_limiter_priority = Env::IO_USER;
@@ -772,27 +780,11 @@ void StressTest::OperateDb(ThreadState* thread) {
 
 #ifndef NDEBUG
   if (FLAGS_read_fault_one_in) {
-    fault_fs_guard->SetThreadLocalReadErrorContext(thread->shared->GetSeed(),
-                                                   FLAGS_read_fault_one_in);
+    fault_fs_guard->SetThreadLocalReadErrorContext(
+        thread->shared->GetSeed(), FLAGS_read_fault_one_in,
+        FLAGS_inject_error_severity == 1 /* retryable */);
   }
 #endif  // NDEBUG
-  if (FLAGS_write_fault_one_in) {
-    IOStatus error_msg;
-    if (FLAGS_injest_error_severity <= 1 || FLAGS_injest_error_severity > 2) {
-      error_msg = IOStatus::IOError("Retryable IO Error");
-      error_msg.SetRetryable(true);
-    } else if (FLAGS_injest_error_severity == 2) {
-      // Ingest the fatal error
-      error_msg = IOStatus::IOError("Fatal IO Error");
-      error_msg.SetDataLoss(true);
-    }
-    std::vector<FileType> types = {FileType::kTableFile,
-                                   FileType::kDescriptorFile,
-                                   FileType::kCurrentFile};
-    fault_fs_guard->SetRandomWriteError(
-        thread->shared->GetSeed(), FLAGS_write_fault_one_in, error_msg,
-        /*inject_for_all_file_types=*/false, types);
-  }
   thread->stats.Start();
   for (int open_cnt = 0; open_cnt <= FLAGS_reopen; ++open_cnt) {
     if (thread->shared->HasVerificationFailedYet() ||
@@ -995,8 +987,13 @@ void StressTest::OperateDb(ThreadState* thread) {
         if (total_size <= FLAGS_backup_max_size) {
           Status s = TestBackupRestore(thread, rand_column_families, rand_keys);
           if (!s.ok()) {
-            VerificationAbort(shared, "Backup/restore gave inconsistent state",
-                              s);
+            if (!s.IsIOError() || !std::strstr(s.getState(), "injected")) {
+              VerificationAbort(shared,
+                                "Backup/restore gave inconsistent state", s);
+            } else {
+              fprintf(stdout, "Backup/restore failed: %s\n",
+                      s.ToString().c_str());
+            }
           }
         }
       }
@@ -1004,7 +1001,11 @@ void StressTest::OperateDb(ThreadState* thread) {
       if (thread->rand.OneInOpt(FLAGS_checkpoint_one_in)) {
         Status s = TestCheckpoint(thread, rand_column_families, rand_keys);
         if (!s.ok()) {
-          VerificationAbort(shared, "Checkpoint gave inconsistent state", s);
+          if (!s.IsIOError() || !std::strstr(s.getState(), "injected")) {
+            VerificationAbort(shared, "Checkpoint gave inconsistent state", s);
+          } else {
+            fprintf(stdout, "Checkpoint failed: %s\n", s.ToString().c_str());
+          }
         }
       }
 
@@ -1042,6 +1043,7 @@ void StressTest::OperateDb(ThreadState* thread) {
       if (prob_op >= 0 && prob_op < static_cast<int>(FLAGS_readpercent)) {
         assert(0 <= prob_op);
         // OPERATION read
+        ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
         if (FLAGS_use_multi_get_entity) {
           constexpr uint64_t max_batch_size = 64;
           const uint64_t batch_size = std::min(
@@ -1052,12 +1054,14 @@ void StressTest::OperateDb(ThreadState* thread) {
           assert(i + batch_size <= ops_per_open);
 
           rand_keys = GenerateNKeys(thread, static_cast<int>(batch_size), i);
-
+          ThreadStatusUtil::SetThreadOperation(
+              ThreadStatus::OperationType::OP_MULTIGETENTITY);
           TestMultiGetEntity(thread, read_opts, rand_column_families,
                              rand_keys);
-
           i += batch_size - 1;
         } else if (FLAGS_use_get_entity) {
+          ThreadStatusUtil::SetThreadOperation(
+              ThreadStatus::OperationType::OP_GETENTITY);
           TestGetEntity(thread, read_opts, rand_column_families, rand_keys);
         } else if (FLAGS_use_multiget) {
           // Leave room for one more iteration of the loop with a single key
@@ -1069,19 +1073,16 @@ void StressTest::OperateDb(ThreadState* thread) {
           // If its the last iteration, ensure that multiget_batch_size is 1
           multiget_batch_size = std::max(multiget_batch_size, 1);
           rand_keys = GenerateNKeys(thread, multiget_batch_size, i);
-          ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
           ThreadStatusUtil::SetThreadOperation(
               ThreadStatus::OperationType::OP_MULTIGET);
           TestMultiGet(thread, read_opts, rand_column_families, rand_keys);
-          ThreadStatusUtil::ResetThreadStatus();
           i += multiget_batch_size - 1;
         } else {
-          ThreadStatusUtil::SetEnableTracking(FLAGS_enable_thread_tracking);
           ThreadStatusUtil::SetThreadOperation(
               ThreadStatus::OperationType::OP_GET);
           TestGet(thread, read_opts, rand_column_families, rand_keys);
-          ThreadStatusUtil::ResetThreadStatus();
         }
+        ThreadStatusUtil::ResetThreadStatus();
       } else if (prob_op < prefix_bound) {
         assert(static_cast<int>(FLAGS_readpercent) <= prob_op);
         // OPERATION prefix scan
@@ -1339,6 +1340,14 @@ Status StressTest::TestIterate(ThreadState* thread,
 
     const bool support_seek_first_or_last = expect_total_order;
 
+    // Write-prepared and Write-unprepared do not support Refresh() yet.
+    if (!(FLAGS_use_txn && FLAGS_txn_write_policy != 0 /* write committed */) &&
+        thread->rand.OneIn(4)) {
+      Status s = iter->Refresh(snapshot_guard.snapshot());
+      assert(s.ok());
+      op_logs += "Refresh ";
+    }
+
     LastIterateOp last_op;
     if (support_seek_first_or_last && thread->rand.OneIn(100)) {
       iter->SeekToFirst();
@@ -1366,7 +1375,8 @@ Status StressTest::TestIterate(ThreadState* thread,
                    key, op_logs, &diverged);
 
     const bool no_reverse =
-        (FLAGS_memtablerep == "prefix_hash" && !expect_total_order);
+        (FLAGS_memtablerep == "prefix_hash" && !expect_total_order) ||
+        FLAGS_auto_readahead_size;
     for (uint64_t i = 0; i < FLAGS_num_iterations && iter->Valid(); ++i) {
       if (no_reverse || thread->rand.OneIn(2)) {
         iter->Next();
@@ -2484,6 +2494,8 @@ void StressTest::PrintEnv() const {
           FLAGS_use_get_entity ? "true" : "false");
   fprintf(stdout, "Use MultiGetEntity        : %s\n",
           FLAGS_use_multi_get_entity ? "true" : "false");
+  fprintf(stdout, "Verification only         : %s\n",
+          FLAGS_verification_only ? "true" : "false");
 
   const char* memtablerep = "";
   switch (FLAGS_rep_factory) {
@@ -2562,7 +2574,7 @@ void StressTest::PrintEnv() const {
   fprintf(stdout, "------------------------------------------------\n");
 }
 
-void StressTest::Open(SharedState* shared) {
+void StressTest::Open(SharedState* shared, bool reopen) {
   assert(db_ == nullptr);
   assert(txn_db_ == nullptr);
   assert(optimistic_txn_db_ == nullptr);
@@ -2680,15 +2692,20 @@ void StressTest::Open(SharedState* shared) {
         FLAGS_db, options_.db_paths, cf_descriptors, db_stress_listener_env));
     RegisterAdditionalListeners();
 
+    // If this is for DB reopen, write error injection may have been enabled.
+    // Disable it here in case there is no open fault injection.
+    if (fault_fs_guard) {
+      fault_fs_guard->DisableWriteErrorInjection();
+    }
     if (!FLAGS_use_txn) {
-      // Determine whether we need to ingest file metadata write failures
+      // Determine whether we need to inject file metadata write failures
       // during DB reopen. If it does, enable it.
-      // Only ingest metadata error if it is reopening, as initial open
+      // Only inject metadata error if it is reopening, as initial open
       // failure doesn't need to be handled.
       // TODO cover transaction DB is not covered in this fault test too.
-      bool ingest_meta_error = false;
-      bool ingest_write_error = false;
-      bool ingest_read_error = false;
+      bool inject_meta_error = false;
+      bool inject_write_error = false;
+      bool inject_read_error = false;
       if ((FLAGS_open_metadata_write_fault_one_in ||
            FLAGS_open_write_fault_one_in || FLAGS_open_read_fault_one_in) &&
           fault_fs_guard
@@ -2699,25 +2716,25 @@ void StressTest::Open(SharedState* shared) {
           // WAL is durable. Buffering unsynced writes will cause false
           // positive in crash tests. Before we figure out a way to
           // solve it, skip WAL from failure injection.
-          fault_fs_guard->SetSkipDirectWritableTypes({kWalFile});
+          fault_fs_guard->SetDirectWritableTypes({kWalFile});
         }
-        ingest_meta_error = FLAGS_open_metadata_write_fault_one_in;
-        ingest_write_error = FLAGS_open_write_fault_one_in;
-        ingest_read_error = FLAGS_open_read_fault_one_in;
-        if (ingest_meta_error) {
+        inject_meta_error = FLAGS_open_metadata_write_fault_one_in;
+        inject_write_error = FLAGS_open_write_fault_one_in;
+        inject_read_error = FLAGS_open_read_fault_one_in;
+        if (inject_meta_error) {
           fault_fs_guard->EnableMetadataWriteErrorInjection();
           fault_fs_guard->SetRandomMetadataWriteError(
               FLAGS_open_metadata_write_fault_one_in);
         }
-        if (ingest_write_error) {
+        if (inject_write_error) {
           fault_fs_guard->SetFilesystemDirectWritable(false);
           fault_fs_guard->EnableWriteErrorInjection();
           fault_fs_guard->SetRandomWriteError(
               static_cast<uint32_t>(FLAGS_seed), FLAGS_open_write_fault_one_in,
-              IOStatus::IOError("Injected Open Error"),
+              IOStatus::IOError("Injected Open Write Error"),
               /*inject_for_all_file_types=*/true, /*types=*/{});
         }
-        if (ingest_read_error) {
+        if (inject_read_error) {
           fault_fs_guard->SetRandomReadError(FLAGS_open_read_fault_one_in);
         }
       }
@@ -2749,14 +2766,16 @@ void StressTest::Open(SharedState* shared) {
           }
         }
 
-        if (ingest_meta_error || ingest_write_error || ingest_read_error) {
+        if (inject_meta_error || inject_write_error || inject_read_error) {
+          // TODO: re-enable write error injection after reopen. Same for
+          //   sync fault injection.
           fault_fs_guard->SetFilesystemDirectWritable(true);
           fault_fs_guard->DisableMetadataWriteErrorInjection();
           fault_fs_guard->DisableWriteErrorInjection();
-          fault_fs_guard->SetSkipDirectWritableTypes({});
+          fault_fs_guard->SetDirectWritableTypes({});
           fault_fs_guard->SetRandomReadError(0);
           if (s.ok()) {
-            // Ingested errors might happen in background compactions. We
+            // Injected errors might happen in background compactions. We
             // wait for all compactions to finish to make sure DB is in
             // clean state before executing queries.
             s = db_->GetRootDB()->WaitForCompact(WaitForCompactOptions());
@@ -2773,19 +2792,24 @@ void StressTest::Open(SharedState* shared) {
             // After failure to opening a DB due to IO error, retry should
             // successfully open the DB with correct data if no IO error shows
             // up.
-            ingest_meta_error = false;
-            ingest_write_error = false;
-            ingest_read_error = false;
+            inject_meta_error = false;
+            inject_write_error = false;
+            inject_read_error = false;
 
-            Random rand(static_cast<uint32_t>(FLAGS_seed));
-            if (rand.OneIn(2)) {
-              fault_fs_guard->DeleteFilesCreatedAfterLastDirSync(IOOptions(),
-                                                                 nullptr);
-            }
-            if (rand.OneIn(3)) {
-              fault_fs_guard->DropUnsyncedFileData();
-            } else if (rand.OneIn(2)) {
-              fault_fs_guard->DropRandomUnsyncedFileData(&rand);
+            // TODO: Unsynced data loss during DB reopen is not supported yet in
+            //  stress test. Will need to recreate expected state if we decide
+            //  to support unsynced data loss during DB reopen.
+            if (!reopen) {
+              Random rand(static_cast<uint32_t>(FLAGS_seed));
+              if (rand.OneIn(2)) {
+                fault_fs_guard->DeleteFilesCreatedAfterLastDirSync(IOOptions(),
+                                                                   nullptr);
+              }
+              if (rand.OneIn(3)) {
+                fault_fs_guard->DropUnsyncedFileData();
+              } else if (rand.OneIn(2)) {
+                fault_fs_guard->DropRandomUnsyncedFileData(&rand);
+              }
             }
             continue;
           }
@@ -2940,7 +2964,7 @@ void StressTest::Reopen(ThreadState* thread) {
   auto now = clock_->NowMicros();
   fprintf(stdout, "%s Reopening database for the %dth time\n",
           clock_->TimeToString(now / 1000000).c_str(), num_times_reopened_);
-  Open(thread->shared);
+  Open(thread->shared, /*reopen=*/true);
 
   if ((FLAGS_sync_fault_injection || FLAGS_disable_wal ||
        FLAGS_manual_wal_flush_one_in > 0) &&

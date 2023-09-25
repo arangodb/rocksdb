@@ -21,6 +21,7 @@ cpp_library_wrapper(name="rocksdb_lib", srcs=[
         "cache/secondary_cache.cc",
         "cache/secondary_cache_adapter.cc",
         "cache/sharded_cache.cc",
+        "cache/tiered_secondary_cache.cc",
         "db/arena_wrapped_db_iter.cc",
         "db/blob/blob_contents.cc",
         "db/blob/blob_fetcher.cc",
@@ -103,6 +104,7 @@ cpp_library_wrapper(name="rocksdb_lib", srcs=[
         "db/wal_manager.cc",
         "db/wide/wide_column_serialization.cc",
         "db/wide/wide_columns.cc",
+        "db/wide/wide_columns_helper.cc",
         "db/write_batch.cc",
         "db/write_batch_base.cc",
         "db/write_controller.cc",
@@ -5474,6 +5476,12 @@ cpp_unittest_wrapper(name="tiered_compaction_test",
             extra_compiler_flags=[])
 
 
+cpp_unittest_wrapper(name="tiered_secondary_cache_test",
+            srcs=["cache/tiered_secondary_cache_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
 cpp_unittest_wrapper(name="timer_queue_test",
             srcs=["util/timer_queue_test.cc"],
             deps=[":rocksdb_test_lib"],
@@ -5548,6 +5556,12 @@ cpp_unittest_wrapper(name="wal_manager_test",
 
 cpp_unittest_wrapper(name="wide_column_serialization_test",
             srcs=["db/wide/wide_column_serialization_test.cc"],
+            deps=[":rocksdb_test_lib"],
+            extra_compiler_flags=[])
+
+
+cpp_unittest_wrapper(name="wide_columns_helper_test",
+            srcs=["db/wide/wide_columns_helper_test.cc"],
             deps=[":rocksdb_test_lib"],
             extra_compiler_flags=[])
 

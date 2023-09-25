@@ -526,10 +526,11 @@ DEFINE_double(bloom_bits, 10,
               "Negative means use default settings.");
 
 DEFINE_int32(
-    ribbon_starting_level, 999,
+    bloom_before_level, 999,
     "Use Bloom filter on levels below specified and Ribbon beginning on level "
-    "specified. Flush is considered level -1. 999 or more -> always Bloom. 0 "
-    "-> Ribbon except Bloom for flush. -1 -> always Ribbon.");
+    "specified. Flush is considered level -1. Setting -1 -> always Ribbon. "
+    "0 -> Ribbon except Bloom for flush. INT_MAX (typically 2147483647) -> "
+    "always Bloom.");
 
 DEFINE_bool(partition_filters, false,
             "use partitioned filters "
@@ -1006,7 +1007,8 @@ DEFINE_string(file_checksum_impl, "none",
               "\"none\" for null.");
 
 DEFINE_int32(write_fault_one_in, 0,
-             "On non-zero, enables fault injection on write");
+             "On non-zero, enables fault injection on write. Currently only"
+             "injects write error when writing to SST files.");
 
 DEFINE_uint64(user_timestamp_size, 0,
               "Number of bytes for a user-defined timestamp. Currently, only "
@@ -1027,8 +1029,8 @@ DEFINE_int32(open_write_fault_one_in, 0,
 DEFINE_int32(open_read_fault_one_in, 0,
              "On non-zero, enables fault injection on file reads "
              "during DB reopen.");
-DEFINE_int32(injest_error_severity, 1,
-             "The severity of the injested IO Error. 1 is soft error (e.g. "
+DEFINE_int32(inject_error_severity, 1,
+             "The severity of the injected IO Error. 1 is soft error (e.g. "
              "retryable error), 2 is fatal error, and the default is "
              "retryable error.");
 DEFINE_int32(prepopulate_block_cache,
@@ -1110,6 +1112,9 @@ DEFINE_uint64(stats_dump_period_sec,
               "Gap between printing stats to log in seconds");
 
 DEFINE_bool(use_io_uring, false, "Enable the use of IO uring on Posix");
+
+DEFINE_bool(verification_only, false,
+            "If true, tests will only execute verification step");
 extern "C" bool RocksDbIOUringEnable() { return FLAGS_use_io_uring; }
 
 DEFINE_uint32(memtable_max_range_deletions, 0,
@@ -1119,5 +1124,8 @@ DEFINE_uint32(memtable_max_range_deletions, 0,
 DEFINE_uint32(bottommost_file_compaction_delay, 0,
               "Delay kBottommostFiles compaction by this amount of seconds."
               "See more in option comment.");
+
+DEFINE_bool(auto_readahead_size, false,
+            "Does auto tuning of readahead_size when enabled during scans.");
 
 #endif  // GFLAGS

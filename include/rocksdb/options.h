@@ -13,6 +13,7 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -206,6 +207,7 @@ struct ColumnFamilyOptions : public AdvancedColumnFamilyOptions {
   // - kZSTD: 3
   // - kZlibCompression: Z_DEFAULT_COMPRESSION (currently -1)
   // - kLZ4HCCompression: 0
+  // - kLZ4: -1 (i.e., `acceleration=1`; see `CompressionOptions::level` doc)
   // - For all others, we do not specify a compression level
   //
   // Dynamically changeable through SetOptions() API
@@ -955,10 +957,10 @@ struct DBOptions {
   // running RocksDB on spinning disks, you should set this to at least 2MB.
   // That way RocksDB's compaction is doing sequential instead of random reads.
   //
-  // Default: 0
+  // Default: 2MB
   //
   // Dynamically changeable through SetDBOptions() API.
-  size_t compaction_readahead_size = 0;
+  size_t compaction_readahead_size = 2 * 1024 * 1024;
 
   // This is a maximum buffer size that is used by WinMmapReadableFile in
   // unbuffered disk I/O mode. We need to maintain an aligned buffer for
@@ -1551,6 +1553,12 @@ struct ReadOptions {
   // soft limit then all the remaining keys are returned with status Aborted.
   uint64_t value_size_soft_limit = std::numeric_limits<uint64_t>::max();
 
+  // When the number of merge operands applied exceeds this threshold
+  // during a successful query, the operation will return a special OK
+  // Status with subcode kMergeOperandThresholdExceeded. Currently only applies
+  // to point lookups and is disabled by default.
+  std::optional<size_t> merge_operand_count_threshold;
+
   // If true, all data read from underlying storage will be
   // verified against corresponding checksums.
   bool verify_checksums = true;
@@ -1711,6 +1719,8 @@ struct ReadOptions {
   // during scans internally.
   // For this feature to enabled, iterate_upper_bound must also be specified.
   //
+  // NOTE: Not supported with Prev operation and it will be return NotSupported
+  // error. Enable it for forward scans only.
   // Default: false
   bool auto_readahead_size = false;
 
