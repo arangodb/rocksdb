@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
 
 #include "utilities/transactions/lock/lock_tracker.h"
 
@@ -35,7 +36,7 @@ struct TrackedKeyInfo {
   }
 };
 
-using TrackedKeyInfos = absl::flat_hash_map<std::string, TrackedKeyInfo>;
+using TrackedKeyInfos = absl::node_hash_map<std::string, TrackedKeyInfo>;
 
 using TrackedKeys = absl::flat_hash_map<ColumnFamilyId, TrackedKeyInfos>;
 
