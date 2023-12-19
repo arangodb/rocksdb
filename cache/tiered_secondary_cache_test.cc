@@ -3,6 +3,8 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 //
+#include "cache/compressed_secondary_cache.h"
+#include "cache/secondary_cache_adapter.h"
 #include "db/db_test_util.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/secondary_cache.h"
@@ -13,10 +15,11 @@ namespace ROCKSDB_NAMESPACE {
 
 class TestSecondaryCache : public SecondaryCache {
  public:
-  explicit TestSecondaryCache(size_t capacity)
+  explicit TestSecondaryCache(size_t capacity, bool ready_before_wait)
       : cache_(NewLRUCache(capacity, 0, false, 0.5 /* high_pri_pool_ratio */,
                            nullptr, kDefaultToAdaptiveMutex,
                            kDontChargeCacheMetadata)),
+        ready_before_wait_(ready_before_wait),
         num_insert_saved_(0),
         num_hits_(0),
         num_misses_(0) {}
@@ -59,7 +62,7 @@ class TestSecondaryCache : public SecondaryCache {
   std::unique_ptr<SecondaryCacheResultHandle> Lookup(
       const Slice& key, const Cache::CacheItemHelper* helper,
       Cache::CreateContext* create_context, bool wait, bool /*advise_erase*/,
-      bool& kept_in_sec_cache) override {
+      Statistics* /*stats*/, bool& kept_in_sec_cache) override {
     std::string key_str = key.ToString();
     TEST_SYNC_POINT_CALLBACK("TestSecondaryCache::Lookup", &key_str);
 
@@ -86,7 +89,8 @@ class TestSecondaryCache : public SecondaryCache {
                             /*alloc*/ nullptr, &value, &charge);
       if (s.ok()) {
         secondary_handle.reset(new TestSecondaryCacheResultHandle(
-            cache_.get(), handle, value, charge, /*ready=*/wait));
+            cache_.get(), handle, value, charge,
+            /*ready=*/wait || ready_before_wait_));
         kept_in_sec_cache = true;
       } else {
         cache_.Release(handle);
@@ -166,6 +170,7 @@ class TestSecondaryCache : public SecondaryCache {
       BasicTypedSharedCacheInterface<char[], CacheEntryRole::kMisc>;
   using TypedHandle = SharedCache::TypedHandle;
   SharedCache cache_;
+  bool ready_before_wait_;
   uint32_t num_insert_saved_;
   uint32_t num_hits_;
   uint32_t num_misses_;
@@ -177,9 +182,10 @@ class DBTieredSecondaryCacheTest : public DBTestBase {
   DBTieredSecondaryCacheTest()
       : DBTestBase("db_tiered_secondary_cache_test", /*env_do_fsync=*/true) {}
 
-  std::shared_ptr<Cache> NewCache(size_t pri_capacity,
-                                  size_t compressed_capacity,
-                                  size_t nvm_capacity) {
+  std::shared_ptr<Cache> NewCache(
+      size_t pri_capacity, size_t compressed_capacity, size_t nvm_capacity,
+      TieredAdmissionPolicy adm_policy = TieredAdmissionPolicy::kAdmPolicyAuto,
+      bool ready_before_wait = false) {
     LRUCacheOptions lru_opts;
     TieredCacheOptions opts;
     lru_opts.capacity = 0;
@@ -187,33 +193,41 @@ class DBTieredSecondaryCacheTest : public DBTestBase {
     lru_opts.high_pri_pool_ratio = 0;
     opts.cache_opts = &lru_opts;
     opts.cache_type = PrimaryCacheType::kCacheTypeLRU;
-    opts.adm_policy = TieredAdmissionPolicy::kAdmPolicyThreeQueue;
     opts.comp_cache_opts.capacity = 0;
     opts.comp_cache_opts.num_shard_bits = 0;
     opts.total_capacity = pri_capacity + compressed_capacity;
-    opts.compressed_secondary_ratio =
+    opts.compressed_secondary_ratio = compressed_secondary_ratio_ =
         (double)compressed_capacity / opts.total_capacity;
-    nvm_sec_cache_.reset(new TestSecondaryCache(nvm_capacity));
-    opts.nvm_sec_cache = nvm_sec_cache_;
+    if (nvm_capacity > 0) {
+      nvm_sec_cache_.reset(
+          new TestSecondaryCache(nvm_capacity, ready_before_wait));
+      opts.nvm_sec_cache = nvm_sec_cache_;
+    }
+    opts.adm_policy = adm_policy;
     cache_ = NewTieredCache(opts);
     assert(cache_ != nullptr);
-
-#if 0
-    CacheWithSecondaryAdapter* adapter_cache_ =
-      static_cast<CacheWithSecondaryAdapter*>(cache_.get());
-    TieredSecondaryCache* tiered_cache_ =
-      static_cast<TieredSecondaryCache*>(
-          adapter_cache_->TEST_GetSecondaryCache());
-#endif
 
     return cache_;
   }
 
+  void ClearPrimaryCache() {
+    ASSERT_EQ(UpdateTieredCache(cache_, -1, 1.0), Status::OK());
+    ASSERT_EQ(UpdateTieredCache(cache_, -1, compressed_secondary_ratio_),
+              Status::OK());
+  }
+
   TestSecondaryCache* nvm_sec_cache() { return nvm_sec_cache_.get(); }
+
+  CompressedSecondaryCache* compressed_secondary_cache() {
+    return static_cast<CompressedSecondaryCache*>(
+        static_cast<CacheWithSecondaryAdapter*>(cache_.get())
+            ->TEST_GetSecondaryCache());
+  }
 
  private:
   std::shared_ptr<Cache> cache_;
   std::shared_ptr<TestSecondaryCache> nvm_sec_cache_;
+  double compressed_secondary_ratio_;
 };
 
 // In this test, the block size is set to 4096. Each value is 1007 bytes, so
@@ -578,6 +592,116 @@ TEST_F(DBTieredSecondaryCacheTest, WaitAllTest) {
   Destroy(options);
 }
 
+TEST_F(DBTieredSecondaryCacheTest, ReadyBeforeWaitAllTest) {
+  if (!LZ4_Supported()) {
+    ROCKSDB_GTEST_SKIP("This test requires LZ4 support.");
+    return;
+  }
+
+  BlockBasedTableOptions table_options;
+  table_options.block_cache = NewCache(250 * 1024, 20 * 1024, 256 * 1024,
+                                       TieredAdmissionPolicy::kAdmPolicyAuto,
+                                       /*ready_before_wait=*/true);
+  table_options.block_size = 4 * 1024;
+  table_options.cache_index_and_filter_blocks = false;
+  Options options = GetDefaultOptions();
+  options.create_if_missing = true;
+  options.table_factory.reset(NewBlockBasedTableFactory(table_options));
+  options.statistics = CreateDBStatistics();
+
+  options.paranoid_file_checks = false;
+  DestroyAndReopen(options);
+  Random rnd(301);
+  const int N = 256;
+  for (int i = 0; i < N; i++) {
+    std::string p_v;
+    test::CompressibleString(&rnd, 0.5, 1007, &p_v);
+    ASSERT_OK(Put(Key(i), p_v));
+  }
+
+  ASSERT_OK(Flush());
+
+  std::vector<std::string> keys;
+  std::vector<std::string> values;
+
+  keys.push_back(Key(0));
+  keys.push_back(Key(4));
+  keys.push_back(Key(8));
+  values = MultiGet(keys, /*snapshot=*/nullptr, /*async=*/true);
+  ASSERT_EQ(values.size(), keys.size());
+  for (auto value : values) {
+    ASSERT_EQ(1007, value.size());
+  }
+  ASSERT_EQ(nvm_sec_cache()->num_insert_saved(), 3u);
+  ASSERT_EQ(nvm_sec_cache()->num_misses(), 3u);
+  ASSERT_EQ(nvm_sec_cache()->num_hits(), 0u);
+  ASSERT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_MISS), 3u);
+
+  keys.clear();
+  values.clear();
+  keys.push_back(Key(12));
+  keys.push_back(Key(16));
+  keys.push_back(Key(20));
+  values = MultiGet(keys, /*snapshot=*/nullptr, /*async=*/true);
+  ASSERT_EQ(values.size(), keys.size());
+  for (auto value : values) {
+    ASSERT_EQ(1007, value.size());
+  }
+  ASSERT_EQ(nvm_sec_cache()->num_insert_saved(), 6u);
+  ASSERT_EQ(nvm_sec_cache()->num_misses(), 6u);
+  ASSERT_EQ(nvm_sec_cache()->num_hits(), 0u);
+  ASSERT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_MISS), 6u);
+
+  keys.clear();
+  values.clear();
+  keys.push_back(Key(0));
+  keys.push_back(Key(4));
+  keys.push_back(Key(8));
+  values = MultiGet(keys, /*snapshot=*/nullptr, /*async=*/true);
+  ASSERT_EQ(values.size(), keys.size());
+  for (auto value : values) {
+    ASSERT_EQ(1007, value.size());
+  }
+  ASSERT_EQ(nvm_sec_cache()->num_insert_saved(), 6u);
+  ASSERT_EQ(nvm_sec_cache()->num_misses(), 6u);
+  ASSERT_EQ(nvm_sec_cache()->num_hits(), 3u);
+  ASSERT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_MISS), 6u);
+
+  ClearPrimaryCache();
+
+  keys.clear();
+  values.clear();
+  keys.push_back(Key(0));
+  keys.push_back(Key(32));
+  keys.push_back(Key(36));
+  values = MultiGet(keys, /*snapshot=*/nullptr, /*async=*/true);
+  ASSERT_EQ(values.size(), keys.size());
+  for (auto value : values) {
+    ASSERT_EQ(1007, value.size());
+  }
+  ASSERT_EQ(nvm_sec_cache()->num_insert_saved(), 8u);
+  ASSERT_EQ(nvm_sec_cache()->num_misses(), 8u);
+  ASSERT_EQ(nvm_sec_cache()->num_hits(), 4u);
+  ASSERT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_MISS), 8u);
+
+  keys.clear();
+  values.clear();
+  keys.push_back(Key(0));
+  keys.push_back(Key(32));
+  keys.push_back(Key(36));
+  values = MultiGet(keys, /*snapshot=*/nullptr, /*async=*/true);
+  ASSERT_EQ(values.size(), keys.size());
+  for (auto value : values) {
+    ASSERT_EQ(1007, value.size());
+  }
+  ASSERT_EQ(nvm_sec_cache()->num_insert_saved(), 8u);
+  ASSERT_EQ(nvm_sec_cache()->num_misses(), 8u);
+  ASSERT_EQ(nvm_sec_cache()->num_hits(), 4u);
+  ASSERT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_MISS), 8u);
+
+  Destroy(options);
+}
+
 // This test is for iteration. It iterates through a set of keys in two
 // passes. First pass loads the compressed blocks into the nvm tier, and
 // the second pass should hit all of those blocks.
@@ -635,6 +759,68 @@ TEST_F(DBTieredSecondaryCacheTest, IterateTest) {
 
   Destroy(options);
 }
+
+class DBTieredAdmPolicyTest
+    : public DBTieredSecondaryCacheTest,
+      public testing::WithParamInterface<TieredAdmissionPolicy> {};
+
+TEST_P(DBTieredAdmPolicyTest, CompressedOnlyTest) {
+  if (!LZ4_Supported()) {
+    ROCKSDB_GTEST_SKIP("This test requires LZ4 support.");
+    return;
+  }
+
+  BlockBasedTableOptions table_options;
+  // We want a block cache of size 10KB, and a compressed secondary cache of
+  // size 10KB. However, we specify a block cache size of 256KB here in order
+  // to take into account the cache reservation in the block cache on
+  // behalf of the compressed cache. The unit of cache reservation is 256KB.
+  // The effective block cache capacity will be calculated as 256 + 10 = 266KB,
+  // and 256KB will be reserved for the compressed cache, leaving 10KB for
+  // the primary block cache. We only have to worry about this here because
+  // the cache size is so small.
+  table_options.block_cache = NewCache(256 * 1024, 10 * 1024, 0, GetParam());
+  table_options.block_size = 4 * 1024;
+  table_options.cache_index_and_filter_blocks = false;
+  Options options = GetDefaultOptions();
+  options.create_if_missing = true;
+  options.table_factory.reset(NewBlockBasedTableFactory(table_options));
+
+  size_t comp_cache_usage = compressed_secondary_cache()->TEST_GetUsage();
+  // Disable paranoid_file_checks so that flush will not read back the newly
+  // written file
+  options.paranoid_file_checks = false;
+  DestroyAndReopen(options);
+  Random rnd(301);
+  const int N = 256;
+  for (int i = 0; i < N; i++) {
+    std::string p_v;
+    test::CompressibleString(&rnd, 0.5, 1007, &p_v);
+    ASSERT_OK(Put(Key(i), p_v));
+  }
+
+  ASSERT_OK(Flush());
+
+  // The first 2 Gets, for keys 0 and 5, will load the corresponding data
+  // blocks as they will be cache misses. Since this is a 2-tier cache (
+  // primary and compressed), no warm-up should happen with the compressed
+  // blocks.
+  std::string v = Get(Key(0));
+  ASSERT_EQ(1007, v.size());
+
+  v = Get(Key(5));
+  ASSERT_EQ(1007, v.size());
+
+  ASSERT_EQ(compressed_secondary_cache()->TEST_GetUsage(), comp_cache_usage);
+
+  Destroy(options);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    DBTieredAdmPolicyTest, DBTieredAdmPolicyTest,
+    ::testing::Values(TieredAdmissionPolicy::kAdmPolicyAuto,
+                      TieredAdmissionPolicy::kAdmPolicyPlaceholder,
+                      TieredAdmissionPolicy::kAdmPolicyAllowCacheHits));
 
 }  // namespace ROCKSDB_NAMESPACE
 

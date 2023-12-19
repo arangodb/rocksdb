@@ -786,6 +786,7 @@ set(SOURCES
         options/configurable.cc
         options/customizable.cc
         options/db_options.cc
+        options/offpeak_time_info.cc
         options/options.cc
         options/options_helper.cc
         options/options_parser.cc
@@ -1119,12 +1120,16 @@ set(BUILD_VERSION_CC ${CMAKE_BINARY_DIR}/build_version.cc)
 configure_file(util/build_version.cc.in ${BUILD_VERSION_CC} @ONLY)
 
 add_library(${ROCKSDB_STATIC_LIB} STATIC ${SOURCES} ${BUILD_VERSION_CC})
+target_include_directories(${ROCKSDB_STATIC_LIB} PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
 target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE
   ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
 target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE absl::flat_hash_map)
 
 if(ROCKSDB_BUILD_SHARED)
   add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES} ${BUILD_VERSION_CC})
+  target_include_directories(${ROCKSDB_SHARED_LIB} PUBLIC
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
   target_link_libraries(${ROCKSDB_SHARED_LIB} PRIVATE
     ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
 
@@ -1613,6 +1618,3 @@ option(WITH_BENCHMARK "build benchmark tests" OFF)
 if(WITH_BENCHMARK)
   add_subdirectory(${PROJECT_SOURCE_DIR}/microbench/)
 endif()
-
-target_include_directories(${PROJECT_NAME} PUBLIC
-  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)

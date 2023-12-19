@@ -161,7 +161,7 @@ Status CheckpointImpl::CreateCheckpoint(const std::string& checkpoint_dir,
 
       // we copied all the files, enable file deletions
       if (disabled_file_deletions) {
-        Status ss = db_->EnableFileDeletions(false);
+        Status ss = db_->EnableFileDeletions(/*force=*/false);
         assert(ss.ok());
         ss.PermitUncheckedError();
       }
@@ -351,7 +351,7 @@ Status CheckpointImpl::ExportColumnFamily(
                             nullptr, Temperature::kUnknown);
           } /*copy_file_cb*/);
 
-      const auto enable_status = db_->EnableFileDeletions(false /*force*/);
+      const auto enable_status = db_->EnableFileDeletions(/*force=*/false);
       if (s.ok()) {
         s = enable_status;
       }

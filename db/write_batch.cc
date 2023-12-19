@@ -39,6 +39,7 @@
 #include "rocksdb/write_batch.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <stack>
@@ -232,9 +233,9 @@ WriteBatch& WriteBatch::operator=(WriteBatch&& src) {
   return *this;
 }
 
-WriteBatch::~WriteBatch() {}
+WriteBatch::~WriteBatch() = default;
 
-WriteBatch::Handler::~Handler() {}
+WriteBatch::Handler::~Handler() = default;
 
 void WriteBatch::Handler::LogData(const Slice& /*blob*/) {
   // If the user has not specified something to do with blobs, then we ignore
@@ -740,7 +741,7 @@ SequenceNumber WriteBatchInternal::Sequence(const WriteBatch* b) {
 }
 
 void WriteBatchInternal::SetSequence(WriteBatch* b, SequenceNumber seq) {
-  EncodeFixed64(&b->rep_[0], seq);
+  EncodeFixed64(b->rep_.data(), seq);
 }
 
 size_t WriteBatchInternal::GetFirstOffset(WriteBatch* /*b*/) {
@@ -1014,6 +1015,22 @@ Status WriteBatch::PutEntity(ColumnFamilyHandle* column_family,
   }
 
   return WriteBatchInternal::PutEntity(this, cf_id, key, columns);
+}
+
+Status WriteBatch::PutEntity(const Slice& key,
+                             const AttributeGroups& attribute_groups) {
+  if (attribute_groups.empty()) {
+    return Status::InvalidArgument(
+        "Cannot call this method with empty attribute groups");
+  }
+  Status s;
+  for (const AttributeGroup& ag : attribute_groups) {
+    s = PutEntity(ag.column_family(), key, ag.columns());
+    if (!s.ok()) {
+      return s;
+    }
+  }
+  return s;
 }
 
 Status WriteBatchInternal::InsertNoop(WriteBatch* b) {
@@ -1839,7 +1856,9 @@ class MemTableInserter : public WriteBatch::Handler {
   }
 
   void DecrementProtectionInfoIdxForTryAgain() {
-    if (prot_info_ != nullptr) --prot_info_idx_;
+    if (prot_info_ != nullptr) {
+      --prot_info_idx_;
+    }
   }
 
   void ResetProtectionInfo() {
@@ -2483,15 +2502,15 @@ class MemTableInserter : public WriteBatch::Handler {
     }
 
     if (perform_merge) {
-      // TODO: support wide-column base values for max_successive_merges
-
-      // 1) Get the existing value
-      std::string get_value;
+      // 1) Get the existing value. Use the wide column APIs to make sure we
+      // don't lose any columns in the process.
+      PinnableWideColumns existing;
 
       // Pass in the sequence number so that we also include previous merge
       // operations in the same batch.
       SnapshotImpl read_from_snapshot;
       read_from_snapshot.number_ = sequence_;
+
       // TODO: plumb Env::IOActivity
       ReadOptions read_options;
       read_options.snapshot = &read_from_snapshot;
@@ -2500,28 +2519,45 @@ class MemTableInserter : public WriteBatch::Handler {
       if (cf_handle == nullptr) {
         cf_handle = db_->DefaultColumnFamily();
       }
-      Status get_status = db_->Get(read_options, cf_handle, key, &get_value);
+
+      Status get_status =
+          db_->GetEntity(read_options, cf_handle, key, &existing);
       if (!get_status.ok()) {
         // Failed to read a key we know exists. Store the delta in memtable.
         perform_merge = false;
       } else {
-        Slice get_value_slice = Slice(get_value);
-
         // 2) Apply this merge
         auto merge_operator = moptions->merge_operator;
         assert(merge_operator);
 
+        const auto& columns = existing.columns();
+
+        Status merge_status;
         std::string new_value;
         ValueType new_value_type;
-        // `op_failure_scope` (an output parameter) is not provided (set to
-        // nullptr) since a failure must be propagated regardless of its value.
-        Status merge_status = MergeHelper::TimedFullMerge(
-            merge_operator, key, MergeHelper::kPlainBaseValue, get_value_slice,
-            {value}, moptions->info_log, moptions->statistics,
-            SystemClock::Default().get(),
-            /* update_num_ops_stats */ false, &new_value,
-            /* result_operand */ nullptr, &new_value_type,
-            /* op_failure_scope */ nullptr);
+
+        if (WideColumnsHelper::HasDefaultColumnOnly(columns)) {
+          // `op_failure_scope` (an output parameter) is not provided (set to
+          // nullptr) since a failure must be propagated regardless of its
+          // value.
+          merge_status = MergeHelper::TimedFullMerge(
+              merge_operator, key, MergeHelper::kPlainBaseValue,
+              WideColumnsHelper::GetDefaultColumn(columns), {value},
+              moptions->info_log, moptions->statistics,
+              SystemClock::Default().get(),
+              /* update_num_ops_stats */ false, /* op_failure_scope */ nullptr,
+              &new_value, /* result_operand */ nullptr, &new_value_type);
+        } else {
+          // `op_failure_scope` (an output parameter) is not provided (set to
+          // nullptr) since a failure must be propagated regardless of its
+          // value.
+          merge_status = MergeHelper::TimedFullMerge(
+              merge_operator, key, MergeHelper::kWideBaseValue, columns,
+              {value}, moptions->info_log, moptions->statistics,
+              SystemClock::Default().get(),
+              /* update_num_ops_stats */ false, /* op_failure_scope */ nullptr,
+              &new_value, /* result_operand */ nullptr, &new_value_type);
+        }
 
         if (!merge_status.ok()) {
           // Failed to merge!
@@ -2530,12 +2566,13 @@ class MemTableInserter : public WriteBatch::Handler {
         } else {
           // 3) Add value to memtable
           assert(!concurrent_memtable_writes_);
+          assert(new_value_type == kTypeValue ||
+                 new_value_type == kTypeWideColumnEntity);
+
           if (kv_prot_info != nullptr) {
             auto merged_kv_prot_info =
                 kv_prot_info->StripC(column_family_id).ProtectS(sequence_);
             merged_kv_prot_info.UpdateV(value, new_value);
-            assert(new_value_type == kTypeValue ||
-                   new_value_type == kTypeWideColumnEntity);
             merged_kv_prot_info.UpdateO(kTypeMerge, new_value_type);
             ret_status = mem->Add(sequence_, new_value_type, key, new_value,
                                   &merged_kv_prot_info);
@@ -2981,7 +3018,7 @@ class ProtectionInfoUpdater : public WriteBatch::Handler {
   explicit ProtectionInfoUpdater(WriteBatch::ProtectionInfo* prot_info)
       : prot_info_(prot_info) {}
 
-  ~ProtectionInfoUpdater() override {}
+  ~ProtectionInfoUpdater() override = default;
 
   Status PutCF(uint32_t cf, const Slice& key, const Slice& val) override {
     return UpdateProtInfo(cf, key, val, kTypeValue);
