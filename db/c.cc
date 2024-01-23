@@ -3049,6 +3049,14 @@ void rocksdb_options_set_max_bytes_for_level_multiplier_additional(
   }
 }
 
+void rocksdb_options_set_ttl(rocksdb_options_t* opt, uint64_t seconds) {
+  opt->rep.ttl = seconds;
+}
+
+uint64_t rocksdb_options_get_ttl(rocksdb_options_t* opt) {
+  return opt->rep.ttl;
+}
+
 void rocksdb_options_set_periodic_compaction_seconds(rocksdb_options_t* opt,
                                                      uint64_t seconds) {
   opt->rep.periodic_compaction_seconds = seconds;
@@ -3994,6 +4002,16 @@ rocksdb_ratelimiter_t* rocksdb_ratelimiter_create_auto_tuned(
                                                 refill_period_us, fairness,
                                                 RateLimiter::Mode::kWritesOnly,
                                                 true));  // auto_tuned
+  return rate_limiter;
+}
+
+rocksdb_ratelimiter_t* rocksdb_ratelimiter_create_with_mode(
+    int64_t rate_bytes_per_sec, int64_t refill_period_us, int32_t fairness,
+    int mode, bool auto_tuned) {
+  rocksdb_ratelimiter_t* rate_limiter = new rocksdb_ratelimiter_t;
+  rate_limiter->rep.reset(
+      NewGenericRateLimiter(rate_bytes_per_sec, refill_period_us, fairness,
+                            static_cast<RateLimiter::Mode>(mode), auto_tuned));
   return rate_limiter;
 }
 

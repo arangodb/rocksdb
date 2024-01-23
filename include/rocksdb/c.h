@@ -1261,6 +1261,9 @@ rocksdb_options_set_max_bytes_for_level_multiplier_additional(
     rocksdb_options_t*, int* level_values, size_t num_levels);
 extern ROCKSDB_LIBRARY_API void rocksdb_options_enable_statistics(
     rocksdb_options_t*);
+extern ROCKSDB_LIBRARY_API void rocksdb_options_set_ttl(rocksdb_options_t*,
+                                                        uint64_t);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_options_get_ttl(rocksdb_options_t*);
 extern ROCKSDB_LIBRARY_API void rocksdb_options_set_periodic_compaction_seconds(
     rocksdb_options_t*, uint64_t);
 extern ROCKSDB_LIBRARY_API uint64_t
@@ -1681,6 +1684,10 @@ extern ROCKSDB_LIBRARY_API rocksdb_ratelimiter_t*
 rocksdb_ratelimiter_create_auto_tuned(int64_t rate_bytes_per_sec,
                                       int64_t refill_period_us,
                                       int32_t fairness);
+extern ROCKSDB_LIBRARY_API rocksdb_ratelimiter_t*
+rocksdb_ratelimiter_create_with_mode(int64_t rate_bytes_per_sec,
+                                     int64_t refill_period_us, int32_t fairness,
+                                     int mode, bool auto_tuned);
 extern ROCKSDB_LIBRARY_API void rocksdb_ratelimiter_destroy(
     rocksdb_ratelimiter_t*);
 

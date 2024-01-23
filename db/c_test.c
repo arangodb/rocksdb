@@ -718,6 +718,11 @@ int main(int argc, char** argv) {
   rocksdb_options_set_ratelimiter(options, rate_limiter);
   rocksdb_ratelimiter_destroy(rate_limiter);
 
+  rate_limiter = rocksdb_ratelimiter_create_with_mode(1000 * 1024 * 1024,
+                                                      100 * 1000, 10, 0, true);
+  rocksdb_options_set_ratelimiter(options, rate_limiter);
+  rocksdb_ratelimiter_destroy(rate_limiter);
+
   roptions = rocksdb_readoptions_create();
   rocksdb_readoptions_set_verify_checksums(roptions, 1);
   rocksdb_readoptions_set_fill_cache(roptions, 1);
@@ -1925,6 +1930,9 @@ int main(int argc, char** argv) {
     CheckCondition(100000 ==
                    rocksdb_options_get_periodic_compaction_seconds(o));
 
+    rocksdb_options_set_ttl(o, 5000);
+    CheckCondition(5000 == rocksdb_options_get_ttl(o));
+
     rocksdb_options_set_skip_stats_update_on_db_open(o, 1);
     CheckCondition(1 == rocksdb_options_get_skip_stats_update_on_db_open(o));
 
@@ -2360,6 +2368,10 @@ int main(int argc, char** argv) {
                    rocksdb_options_get_periodic_compaction_seconds(copy));
     CheckCondition(100000 ==
                    rocksdb_options_get_periodic_compaction_seconds(o));
+
+    rocksdb_options_set_ttl(copy, 8000);
+    CheckCondition(8000 == rocksdb_options_get_ttl(copy));
+    CheckCondition(5000 == rocksdb_options_get_ttl(o));
 
     rocksdb_options_set_skip_stats_update_on_db_open(copy, 0);
     CheckCondition(0 == rocksdb_options_get_skip_stats_update_on_db_open(copy));

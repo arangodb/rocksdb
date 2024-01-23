@@ -126,6 +126,10 @@ class DBIter final : public Iterator {
   void operator=(const DBIter&) = delete;
 
   ~DBIter() override {
+    ThreadStatus::OperationType cur_op_type =
+        ThreadStatusUtil::GetThreadOperation();
+    ThreadStatusUtil::SetThreadOperation(
+        ThreadStatus::OperationType::OP_UNKNOWN);
     // Release pinned data if any
     if (pinned_iters_mgr_.PinningEnabled()) {
       pinned_iters_mgr_.ReleasePinnedData();
@@ -134,6 +138,7 @@ class DBIter final : public Iterator {
     ResetInternalKeysSkippedCounter();
     local_stats_.BumpGlobalStatistics(statistics_);
     iter_.DeleteIter(arena_mode_);
+    ThreadStatusUtil::SetThreadOperation(cur_op_type);
   }
   void SetIter(InternalIterator* iter) {
     assert(iter_.iter() == nullptr);
@@ -327,6 +332,22 @@ class DBIter final : public Iterator {
   bool MergeWithNoBaseValue(const Slice& user_key);
   bool MergeWithPlainBaseValue(const Slice& value, const Slice& user_key);
   bool MergeWithWideColumnBaseValue(const Slice& entity, const Slice& user_key);
+
+  bool PrepareValue() {
+    if (!iter_.PrepareValue()) {
+      assert(!iter_.status().ok());
+      valid_ = false;
+      return false;
+    }
+    // ikey_ could change as BlockBasedTableIterator does Block cache
+    // lookup and index_iter_ could point to different block resulting
+    // in ikey_ pointing to wrong key. So ikey_ needs to be updated in
+    // case of Seek/Next calls to point to right key again.
+    if (!ParseKey(&ikey_)) {
+      return false;
+    }
+    return true;
+  }
 
   const SliceTransform* prefix_extractor_;
   Env* const env_;

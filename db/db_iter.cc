@@ -201,6 +201,7 @@ bool DBIter::SetBlobValueIfNeeded(const Slice& user_key,
 
   // TODO: consider moving ReadOptions from ArenaWrappedDBIter to DBIter to
   // avoid having to copy options back and forth.
+  // TODO: plumb Env::IOActivity, Env::IOPriority
   ReadOptions read_options;
   read_options.read_tier = read_tier_;
   read_options.fill_cache = fill_cache_;
@@ -394,9 +395,7 @@ bool DBIter::FindNextUserEntryInternal(bool skipping_saved_key,
           case kTypeValue:
           case kTypeBlobIndex:
           case kTypeWideColumnEntity:
-            if (!iter_.PrepareValue()) {
-              assert(!iter_.status().ok());
-              valid_ = false;
+            if (!PrepareValue()) {
               return false;
             }
             if (timestamp_lb_) {
@@ -427,9 +426,7 @@ bool DBIter::FindNextUserEntryInternal(bool skipping_saved_key,
             return true;
             break;
           case kTypeMerge:
-            if (!iter_.PrepareValue()) {
-              assert(!iter_.status().ok());
-              valid_ = false;
+            if (!PrepareValue()) {
               return false;
             }
             saved_key_.SetUserKey(
@@ -574,8 +571,7 @@ bool DBIter::MergeValuesNewToOld() {
       iter_.Next();
       break;
     }
-    if (!iter_.PrepareValue()) {
-      valid_ = false;
+    if (!PrepareValue()) {
       return false;
     }
 
@@ -901,8 +897,7 @@ bool DBIter::FindValueForCurrentKey() {
       return FindValueForCurrentKeyUsingSeek();
     }
 
-    if (!iter_.PrepareValue()) {
-      valid_ = false;
+    if (!PrepareValue()) {
       return false;
     }
 
@@ -1141,8 +1136,7 @@ bool DBIter::FindValueForCurrentKeyUsingSeek() {
     }
     return true;
   }
-  if (!iter_.PrepareValue()) {
-    valid_ = false;
+  if (!PrepareValue()) {
     return false;
   }
   if (timestamp_size_ > 0) {
@@ -1207,8 +1201,7 @@ bool DBIter::FindValueForCurrentKeyUsingSeek() {
         ikey.type == kTypeDeletionWithTimestamp) {
       break;
     }
-    if (!iter_.PrepareValue()) {
-      valid_ = false;
+    if (!PrepareValue()) {
       return false;
     }
 
