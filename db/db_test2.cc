@@ -2330,7 +2330,7 @@ TEST_F(DBTest2, MaxCompactionBytesTest) {
 }
 
 static void UniqueIdCallback(void* arg) {
-  int* result = reinterpret_cast<int*>(arg);
+  int* result = static_cast<int*>(arg);
   if (*result == -1) {
     *result = 0;
   }
@@ -3947,6 +3947,15 @@ TEST_F(DBTest2, RateLimitedCompactionReads) {
       options.table_factory.reset(NewBlockBasedTableFactory(bbto));
       DestroyAndReopen(options);
 
+      // To precisely control when to start bg compaction for excluding previous
+      // rate-limited bytes of flush read for table verification
+      std::shared_ptr<test::SleepingBackgroundTask> sleeping_task(
+          new test::SleepingBackgroundTask());
+      env_->SetBackgroundThreads(1, Env::LOW);
+      env_->Schedule(&test::SleepingBackgroundTask::DoSleepTask,
+                     sleeping_task.get(), Env::Priority::LOW);
+      sleeping_task->WaitUntilSleeping();
+
       for (int i = 0; i < kNumL0Files; ++i) {
         for (int j = 0; j <= kNumKeysPerFile; ++j) {
           ASSERT_OK(Put(Key(j), DummyString(kBytesPerKey)));
@@ -3956,13 +3965,20 @@ TEST_F(DBTest2, RateLimitedCompactionReads) {
           ASSERT_EQ(i + 1, NumTableFilesAtLevel(0));
         }
       }
+
+      size_t rate_limited_bytes_start_bytes =
+          options.rate_limiter->GetTotalBytesThrough(Env::IO_TOTAL);
+
+      sleeping_task->WakeUp();
+      sleeping_task->WaitUntilDone();
       ASSERT_OK(dbfull()->TEST_WaitForCompact());
       ASSERT_EQ(0, NumTableFilesAtLevel(0));
-
       // should be slightly above 512KB due to non-data blocks read. Arbitrarily
       // chose 1MB as the upper bound on the total bytes read.
-      size_t rate_limited_bytes = static_cast<size_t>(
-          options.rate_limiter->GetTotalBytesThrough(Env::IO_TOTAL));
+      size_t rate_limited_bytes =
+          static_cast<size_t>(
+              options.rate_limiter->GetTotalBytesThrough(Env::IO_TOTAL)) -
+          rate_limited_bytes_start_bytes;
       // The charges can exist for `IO_LOW` and `IO_USER` priorities.
       size_t rate_limited_bytes_by_pri =
           options.rate_limiter->GetTotalBytesThrough(Env::IO_LOW) +
@@ -4145,7 +4161,7 @@ TEST_F(DBTest2, LiveFilesOmitObsoleteFiles) {
     ASSERT_OK(env_->FileExists(LogFileName(dbname_, log_file->LogNumber())));
   }
 
-  ASSERT_OK(db_->EnableFileDeletions(/*force=*/false));
+  ASSERT_OK(db_->EnableFileDeletions());
   ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
 }
 
@@ -4226,7 +4242,7 @@ class TraceExecutionResultHandler : public TraceRecordResult::Handler {
   TraceExecutionResultHandler() = default;
   ~TraceExecutionResultHandler() override = default;
 
-  virtual Status Handle(const StatusOnlyTraceExecutionResult& result) override {
+  Status Handle(const StatusOnlyTraceExecutionResult& result) override {
     if (result.GetStartTimestamp() > result.GetEndTimestamp()) {
       return Status::InvalidArgument("Invalid timestamps.");
     }
@@ -4244,8 +4260,7 @@ class TraceExecutionResultHandler : public TraceRecordResult::Handler {
     return Status::OK();
   }
 
-  virtual Status Handle(
-      const SingleValueTraceExecutionResult& result) override {
+  Status Handle(const SingleValueTraceExecutionResult& result) override {
     if (result.GetStartTimestamp() > result.GetEndTimestamp()) {
       return Status::InvalidArgument("Invalid timestamps.");
     }
@@ -4263,8 +4278,7 @@ class TraceExecutionResultHandler : public TraceRecordResult::Handler {
     return Status::OK();
   }
 
-  virtual Status Handle(
-      const MultiValuesTraceExecutionResult& result) override {
+  Status Handle(const MultiValuesTraceExecutionResult& result) override {
     if (result.GetStartTimestamp() > result.GetEndTimestamp()) {
       return Status::InvalidArgument("Invalid timestamps.");
     }
@@ -4284,7 +4298,7 @@ class TraceExecutionResultHandler : public TraceRecordResult::Handler {
     return Status::OK();
   }
 
-  virtual Status Handle(const IteratorTraceExecutionResult& result) override {
+  Status Handle(const IteratorTraceExecutionResult& result) override {
     if (result.GetStartTimestamp() > result.GetEndTimestamp()) {
       return Status::InvalidArgument("Invalid timestamps.");
     }
@@ -6458,7 +6472,7 @@ class RenameCurrentTest : public DBTestBase,
   void SetupSyncPoints() {
     SyncPoint::GetInstance()->DisableProcessing();
     SyncPoint::GetInstance()->SetCallBack(sync_point_, [&](void* arg) {
-      Status* s = reinterpret_cast<Status*>(arg);
+      Status* s = static_cast<Status*>(arg);
       assert(s);
       *s = Status::IOError("Injected IO error.");
     });
@@ -7160,7 +7174,7 @@ TEST_F(DBTest2, PointInTimeRecoveryWithIOErrorWhileReadingWal) {
       "LogReader::ReadMore:AfterReadFile", [&](void* arg) {
         if (should_inject_error) {
           ASSERT_NE(nullptr, arg);
-          *reinterpret_cast<Status*>(arg) = Status::IOError("Injected IOError");
+          *static_cast<Status*>(arg) = Status::IOError("Injected IOError");
         }
       });
   SyncPoint::GetInstance()->EnableProcessing();
