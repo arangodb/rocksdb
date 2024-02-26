@@ -43,7 +43,7 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|AARCH64")
 endif ()
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-  set(PORTABLE "haswell" CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+  set(PORTABLE "sandybridge" CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|AARCH64")
   set(PORTABLE 1 CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
 else ()
