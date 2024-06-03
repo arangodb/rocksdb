@@ -505,11 +505,13 @@ Status StressTest::AssertSame(DB* db, ColumnFamilyHandle* cf,
 }
 
 void StressTest::ProcessStatus(SharedState* shared, std::string opname,
-                               Status s) const {
+                               const Status& s,
+                               bool ignore_injected_error) const {
   if (s.ok()) {
     return;
   }
-  if (!s.IsIOError() || !std::strstr(s.getState(), "injected")) {
+  if (!s.IsIOError() || !std::strstr(s.getState(), "injected") ||
+      !ignore_injected_error) {
     std::ostringstream oss;
     oss << opname << " failed: " << s.ToString();
     VerificationAbort(shared, oss.str());
@@ -615,8 +617,21 @@ void StressTest::PreloadDbAndReopenAsReadOnly(int64_t number_of_keys,
 
       if (FLAGS_use_put_entity_one_in > 0 &&
           (value_base % FLAGS_use_put_entity_one_in) == 0) {
-        s = db_->PutEntity(write_opts, cfh, key,
-                           GenerateWideColumns(value_base, v));
+        if (!FLAGS_use_txn) {
+          if (FLAGS_use_attribute_group) {
+            s = db_->PutEntity(write_opts, key,
+                               GenerateAttributeGroups({cfh}, value_base, v));
+          } else {
+            s = db_->PutEntity(write_opts, cfh, key,
+                               GenerateWideColumns(value_base, v));
+          }
+        } else {
+          s = ExecuteTransaction(
+              write_opts, /*thread=*/nullptr, [&](Transaction& txn) {
+                return txn.PutEntity(cfh, key,
+                                     GenerateWideColumns(value_base, v));
+              });
+        }
       } else if (FLAGS_use_merge) {
         if (!FLAGS_use_txn) {
           if (FLAGS_user_timestamp_size > 0) {
@@ -956,12 +971,48 @@ void StressTest::OperateDb(ThreadState* thread) {
         if (!s.ok()) {
           fprintf(stderr, "LockWAL() failed: %s\n", s.ToString().c_str());
         } else {
+          // Verify no writes during LockWAL
           auto old_seqno = db_->GetLatestSequenceNumber();
-          // Yield for a while
-          do {
-            std::this_thread::yield();
-          } while (thread->rand.OneIn(2));
-          // Latest seqno should not have changed
+          // And also that WAL is not changed during LockWAL()
+          std::unique_ptr<WalFile> old_wal;
+          s = db_->GetCurrentWalFile(&old_wal);
+          if (!s.ok()) {
+            fprintf(stderr, "GetCurrentWalFile() failed: %s\n",
+                    s.ToString().c_str());
+          } else {
+            // Yield for a while
+            do {
+              std::this_thread::yield();
+            } while (thread->rand.OneIn(2));
+            // Current WAL and size should not have changed
+            std::unique_ptr<WalFile> new_wal;
+            s = db_->GetCurrentWalFile(&new_wal);
+            if (!s.ok()) {
+              fprintf(stderr, "GetCurrentWalFile() failed: %s\n",
+                      s.ToString().c_str());
+            } else {
+              if (old_wal->LogNumber() != new_wal->LogNumber()) {
+                fprintf(stderr,
+                        "Failed: WAL number changed during LockWAL(): %" PRIu64
+                        " to %" PRIu64 "\n",
+                        old_wal->LogNumber(), new_wal->LogNumber());
+              }
+              // FIXME: FaultInjectionTestFS does not report file sizes that
+              // reflect what has been flushed. Either that needs to be fixed
+              // or GetSortedWals/GetLiveWalFile need to stop relying on
+              // asking the FS for sizes.
+              if (!fault_fs_guard &&
+                  old_wal->SizeFileBytes() != new_wal->SizeFileBytes()) {
+                fprintf(stderr,
+                        "Failed: WAL %" PRIu64
+                        " size changed during LockWAL(): %" PRIu64
+                        " to %" PRIu64 "\n",
+                        old_wal->LogNumber(), old_wal->SizeFileBytes(),
+                        new_wal->SizeFileBytes());
+              }
+            }
+          }
+          // Verify no writes during LockWAL
           auto new_seqno = db_->GetLatestSequenceNumber();
           if (old_seqno != new_seqno) {
             fprintf(
@@ -969,6 +1020,7 @@ void StressTest::OperateDb(ThreadState* thread) {
                 "Failure: latest seqno changed from %u to %u with WAL locked\n",
                 (unsigned)old_seqno, (unsigned)new_seqno);
           }
+          // Verification done. Now unlock WAL
           s = db_->UnlockWAL();
           if (!s.ok()) {
             fprintf(stderr, "UnlockWAL() failed: %s\n", s.ToString().c_str());
@@ -999,6 +1051,10 @@ void StressTest::OperateDb(ThreadState* thread) {
         if (thread->shared->HasVerificationFailedYet()) {
           break;
         }
+      }
+
+      if (thread->rand.OneInOpt(FLAGS_promote_l0_one_in)) {
+        TestPromoteL0(thread, column_family);
       }
 
       std::vector<int> rand_column_families =
@@ -1039,6 +1095,11 @@ void StressTest::OperateDb(ThreadState* thread) {
       if (thread->rand.OneInOpt(FLAGS_get_current_wal_file_one_in)) {
         Status status = VerifyGetCurrentWalFile();
         ProcessStatus(shared, "VerifyGetCurrentWalFile", status);
+      }
+
+      if (thread->rand.OneInOpt(FLAGS_reset_stats_one_in)) {
+        Status status = TestResetStats();
+        ProcessStatus(shared, "ResetStats", status);
       }
 
       if (thread->rand.OneInOpt(FLAGS_pause_background_one_in)) {
@@ -1133,6 +1194,10 @@ void StressTest::OperateDb(ThreadState* thread) {
         read_ts_str = GetNowNanos();
         read_ts = read_ts_str;
         read_opts.timestamp = &read_ts;
+      }
+
+      if (thread->rand.OneInOpt(FLAGS_key_may_exist_one_in)) {
+        TestKeyMayExist(thread, read_opts, rand_column_families, rand_keys);
       }
 
       int prob_op = thread->rand.Uniform(100);
@@ -1360,15 +1425,28 @@ Status StressTest::TestIterate(ThreadState* thread,
     ro.iterate_lower_bound = &lower_bound;
   }
 
-  ColumnFamilyHandle* const cfh = column_families_[rand_column_families[0]];
-  assert(cfh);
+  std::unique_ptr<Iterator> iter;
 
-  std::unique_ptr<Iterator> iter(db_->NewIterator(ro, cfh));
+  if (FLAGS_use_multi_cf_iterator) {
+    std::vector<ColumnFamilyHandle*> cfhs;
+    cfhs.reserve(rand_column_families.size());
+    for (auto cf_index : rand_column_families) {
+      cfhs.emplace_back(column_families_[cf_index]);
+    }
+    assert(!cfhs.empty());
+    iter = db_->NewCoalescingIterator(ro, cfhs);
+  } else {
+    ColumnFamilyHandle* const cfh = column_families_[rand_column_families[0]];
+    assert(cfh);
+    iter = std::unique_ptr<Iterator>(db_->NewIterator(ro, cfh));
+  }
 
   std::vector<std::string> key_strs;
   if (thread->rand.OneIn(16)) {
     // Generate keys close to lower or upper bound of SST files.
-    key_strs = GetWhiteBoxKeys(thread, db_, cfh, rand_keys.size());
+    key_strs =
+        GetWhiteBoxKeys(thread, db_, column_families_[rand_column_families[0]],
+                        rand_keys.size());
   }
   if (key_strs.empty()) {
     // Use the random keys passed in.
@@ -1430,9 +1508,10 @@ Status StressTest::TestIterate(ThreadState* thread,
 
     const bool support_seek_first_or_last = expect_total_order;
 
-    // Write-prepared and Write-unprepared do not support Refresh() yet.
+    // Write-prepared and Write-unprepared and multi-cf-iterator do not support
+    // Refresh() yet.
     if (!(FLAGS_use_txn && FLAGS_txn_write_policy != 0 /* write committed */) &&
-        thread->rand.OneIn(4)) {
+        !FLAGS_use_multi_cf_iterator && thread->rand.OneIn(4)) {
       Status s = iter->Refresh(snapshot_guard.snapshot());
       assert(s.ok());
       op_logs += "Refresh ";
@@ -1527,13 +1606,13 @@ Status StressTest::VerifyGetAllColumnFamilyMetaData() const {
 
 // Test the return status of GetSortedWalFiles.
 Status StressTest::VerifyGetSortedWalFiles() const {
-  VectorLogPtr log_ptr;
+  VectorWalPtr log_ptr;
   return db_->GetSortedWalFiles(log_ptr);
 }
 
 // Test the return status of GetCurrentWalFile.
 Status StressTest::VerifyGetCurrentWalFile() const {
-  std::unique_ptr<LogFile> cur_wal_file;
+  std::unique_ptr<WalFile> cur_wal_file;
   return db_->GetCurrentWalFile(&cur_wal_file);
 }
 
@@ -2428,8 +2507,32 @@ void StressTest::TestCompactFiles(ThreadState* thread,
   }
 }
 
+void StressTest::TestPromoteL0(ThreadState* thread,
+                               ColumnFamilyHandle* column_family) {
+  int target_level = thread->rand.Next() % options_.num_levels;
+  Status s = db_->PromoteL0(column_family, target_level);
+  if (!s.ok()) {
+    // The second error occurs when another concurrent PromoteL0() moving the
+    // same files finishes first which is an allowed behavior
+    bool non_ok_status_allowed =
+        s.IsInvalidArgument() ||
+        (s.IsCorruption() &&
+         s.ToString().find("VersionBuilder: Cannot delete table file") !=
+             std::string::npos &&
+         s.ToString().find("since it is on level") != std::string::npos);
+    fprintf(non_ok_status_allowed ? stdout : stderr,
+            "Unable to perform PromoteL0(): %s under specified "
+            "target_level: %d.\n",
+            s.ToString().c_str(), target_level);
+    if (!non_ok_status_allowed) {
+      thread->shared->SafeTerminate();
+    }
+  }
+}
+
 Status StressTest::TestFlush(const std::vector<int>& rand_column_families) {
   FlushOptions flush_opts;
+  assert(flush_opts.wait);
   if (FLAGS_atomic_flush) {
     return db_->Flush(flush_opts, column_families_);
   }
@@ -2438,6 +2541,8 @@ Status StressTest::TestFlush(const std::vector<int>& rand_column_families) {
                 [this, &cfhs](int k) { cfhs.push_back(column_families_[k]); });
   return db_->Flush(flush_opts, cfhs);
 }
+
+Status StressTest::TestResetStats() { return db_->ResetStats(); }
 
 Status StressTest::TestPauseBackground(ThreadState* thread) {
   Status status = db_->PauseBackgroundWork();
@@ -2583,7 +2688,10 @@ void StressTest::TestCompactRange(ThreadState* thread, int64_t rand_key,
 
   CompactRangeOptions cro;
   cro.exclusive_manual_compaction = static_cast<bool>(thread->rand.Next() % 2);
-  cro.change_level = static_cast<bool>(thread->rand.Next() % 2);
+  if (static_cast<ROCKSDB_NAMESPACE::CompactionStyle>(FLAGS_compaction_style) !=
+      ROCKSDB_NAMESPACE::CompactionStyle::kCompactionStyleFIFO) {
+    cro.change_level = static_cast<bool>(thread->rand.Next() % 2);
+  }
   if (thread->rand.OneIn(2)) {
     cro.target_level = thread->rand.Next() % options_.num_levels;
   }
@@ -2801,7 +2909,8 @@ void StressTest::PrintEnv() const {
   fprintf(stdout, "Num times DB reopens      : %d\n", FLAGS_reopen);
   fprintf(stdout, "Batches/snapshots         : %d\n",
           FLAGS_test_batches_snapshots);
-  fprintf(stdout, "Do update in place        : %d\n", FLAGS_in_place_update);
+  fprintf(stdout, "Do update in place        : %d\n",
+          FLAGS_inplace_update_support);
   fprintf(stdout, "Num keys per lock         : %d\n",
           1 << FLAGS_log2_keys_per_lock);
   std::string compression = CompressionTypeToString(compression_type_e);
@@ -3597,7 +3706,6 @@ void InitializeOptionsFromFlags(
     options.compression_opts.checksum = true;
   }
   options.max_manifest_file_size = FLAGS_max_manifest_file_size;
-  options.inplace_update_support = FLAGS_in_place_update;
   options.max_subcompactions = static_cast<uint32_t>(FLAGS_subcompactions);
   options.allow_concurrent_memtable_write =
       FLAGS_allow_concurrent_memtable_write;
@@ -3618,6 +3726,8 @@ void InitializeOptionsFromFlags(
       FLAGS_universal_max_merge_width;
   options.compaction_options_universal.max_size_amplification_percent =
       FLAGS_universal_max_size_amplification_percent;
+  options.compaction_options_universal.max_read_amp =
+      FLAGS_universal_max_read_amp;
   options.atomic_flush = FLAGS_atomic_flush;
   options.manual_wal_flush = FLAGS_manual_wal_flush_one_in > 0 ? true : false;
   options.avoid_unnecessary_blocking_io = FLAGS_avoid_unnecessary_blocking_io;
@@ -3744,6 +3854,7 @@ void InitializeOptionsFromFlags(
   options.wal_bytes_per_sync = FLAGS_wal_bytes_per_sync;
   options.strict_bytes_per_sync = FLAGS_strict_bytes_per_sync;
   options.avoid_flush_during_shutdown = FLAGS_avoid_flush_during_shutdown;
+  options.avoid_sync_during_shutdown = FLAGS_avoid_sync_during_shutdown;
   options.dump_malloc_stats = FLAGS_dump_malloc_stats;
   options.stats_history_buffer_size = FLAGS_stats_history_buffer_size;
   options.skip_stats_update_on_db_open = FLAGS_skip_stats_update_on_db_open;

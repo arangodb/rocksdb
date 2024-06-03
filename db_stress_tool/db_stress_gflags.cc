@@ -306,6 +306,9 @@ DEFINE_int32(universal_max_merge_width, 0,
 DEFINE_int32(universal_max_size_amplification_percent, 0,
              "The max size amplification for universal style compaction");
 
+DEFINE_int32(universal_max_read_amp, -1,
+             "The limit on the number of sorted runs");
+
 DEFINE_int32(clear_column_family_one_in, 1000000,
              "With a chance of 1/N, delete a column family and then recreate "
              "it again. If N == 0, never drop/create column families. "
@@ -756,6 +759,10 @@ DEFINE_int32(compact_range_one_in, 0,
              "If non-zero, then CompactRange() will be called once for every N "
              "operations on average.  0 indicates CompactRange() is disabled.");
 
+DEFINE_int32(promote_l0_one_in, 0,
+             "If non-zero, then PromoteL0() will be called once for every N "
+             "operations on average.  0 indicates PromoteL0() is disabled.");
+
 DEFINE_int32(mark_for_compaction_one_file_in, 0,
              "A `TablePropertiesCollectorFactory` will be registered, which "
              "creates a `TablePropertiesCollector` with `NeedCompact()` "
@@ -765,6 +772,14 @@ DEFINE_int32(mark_for_compaction_one_file_in, 0,
 DEFINE_int32(flush_one_in, 0,
              "If non-zero, then Flush() will be called once for every N ops "
              "on average.  0 indicates calls to Flush() are disabled.");
+
+DEFINE_int32(key_may_exist_one_in, 0,
+             "If non-zero, then KeyMayExist() will be called "
+             "once for every N ops on average.  0 disables.");
+
+DEFINE_int32(reset_stats_one_in, 0,
+             "If non-zero, then ResetStats() will be called "
+             "once for every N ops on average.  0 disables.");
 
 DEFINE_int32(pause_background_one_in, 0,
              "If non-zero, then PauseBackgroundWork()+Continue will be called "
@@ -940,6 +955,12 @@ DEFINE_uint32(use_put_entity_one_in, 0,
               "If greater than zero, PutEntity will be used once per every N "
               "write ops on average.");
 
+DEFINE_bool(use_attribute_group, false,
+            "If set, use the attribute_group API to put/get entities");
+
+DEFINE_bool(use_multi_cf_iterator, false,
+            "If set, use the multi_cf_iterator for TestIterate");
+
 DEFINE_bool(use_full_merge_v1, false,
             "On true, use a merge operator that implement the deprecated "
             "version of FullMerge");
@@ -960,6 +981,10 @@ DEFINE_bool(write_dbid_to_manifest,
 DEFINE_bool(avoid_flush_during_recovery,
             ROCKSDB_NAMESPACE::Options().avoid_flush_during_recovery,
             "Avoid flush during recovery");
+
+DEFINE_bool(avoid_sync_during_shutdown,
+            ROCKSDB_NAMESPACE::Options().avoid_sync_during_shutdown,
+            "Options.avoid_sync_during_shutdown");
 
 DEFINE_uint64(max_write_batch_group_size_bytes,
               ROCKSDB_NAMESPACE::Options().max_write_batch_group_size_bytes,

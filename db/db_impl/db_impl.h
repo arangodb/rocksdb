@@ -57,6 +57,7 @@
 #include "rocksdb/status.h"
 #include "rocksdb/trace_reader_writer.h"
 #include "rocksdb/transaction_log.h"
+#include "rocksdb/user_write_callback.h"
 #include "rocksdb/utilities/replayer.h"
 #include "rocksdb/write_buffer_manager.h"
 #include "table/merging_iterator.h"
@@ -231,6 +232,10 @@ class DBImpl : public DB {
   using DB::Write;
   Status Write(const WriteOptions& options, WriteBatch* updates) override;
 
+  using DB::WriteWithCallback;
+  Status WriteWithCallback(const WriteOptions& options, WriteBatch* updates,
+                           UserWriteCallback* user_write_cb) override;
+
   using DB::Get;
   Status Get(const ReadOptions& _read_options,
              ColumnFamilyHandle* column_family, const Slice& key,
@@ -290,6 +295,11 @@ class DBImpl : public DB {
   void MultiGetEntity(const ReadOptions& options, size_t num_keys,
                       const Slice* keys,
                       PinnableAttributeGroups* results) override;
+
+  void MultiGetEntityWithCallback(
+      const ReadOptions& read_options, ColumnFamilyHandle* column_family,
+      ReadCallback* callback,
+      autovector<KeyContext*, MultiGetContext::MAX_BATCH_SIZE>* sorted_keys);
 
   Status CreateColumnFamily(const ColumnFamilyOptions& cf_options,
                             const std::string& column_family,
@@ -496,8 +506,8 @@ class DBImpl : public DB {
   // All the returned filenames start with "/"
   Status GetLiveFiles(std::vector<std::string>&, uint64_t* manifest_file_size,
                       bool flush_memtable = true) override;
-  Status GetSortedWalFiles(VectorLogPtr& files) override;
-  Status GetCurrentWalFile(std::unique_ptr<LogFile>* current_log_file) override;
+  Status GetSortedWalFiles(VectorWalPtr& files) override;
+  Status GetCurrentWalFile(std::unique_ptr<WalFile>* current_log_file) override;
   Status GetCreationTimeOfOldestFile(uint64_t* creation_time) override;
 
   Status GetUpdatesSince(
@@ -683,7 +693,8 @@ class DBImpl : public DB {
   // thread to determine whether it is safe to perform the write.
   virtual Status WriteWithCallback(const WriteOptions& write_options,
                                    WriteBatch* my_batch,
-                                   WriteCallback* callback);
+                                   WriteCallback* callback,
+                                   UserWriteCallback* user_write_cb = nullptr);
 
   // Returns the sequence number that is guaranteed to be smaller than or equal
   // to the sequence number of any key that could be inserted into the current
@@ -1492,6 +1503,7 @@ class DBImpl : public DB {
   // batch that does not have duplicate keys.
   Status WriteImpl(const WriteOptions& options, WriteBatch* updates,
                    WriteCallback* callback = nullptr,
+                   UserWriteCallback* user_write_cb = nullptr,
                    uint64_t* log_used = nullptr, uint64_t log_ref = 0,
                    bool disable_memtable = false, uint64_t* seq_used = nullptr,
                    size_t batch_cnt = 0,
@@ -1500,6 +1512,7 @@ class DBImpl : public DB {
 
   Status PipelinedWriteImpl(const WriteOptions& options, WriteBatch* updates,
                             WriteCallback* callback = nullptr,
+                            UserWriteCallback* user_write_cb = nullptr,
                             uint64_t* log_used = nullptr, uint64_t log_ref = 0,
                             bool disable_memtable = false,
                             uint64_t* seq_used = nullptr);
@@ -1526,7 +1539,8 @@ class DBImpl : public DB {
   // marks start of a new sub-batch.
   Status WriteImplWALOnly(
       WriteThread* write_thread, const WriteOptions& options,
-      WriteBatch* updates, WriteCallback* callback, uint64_t* log_used,
+      WriteBatch* updates, WriteCallback* callback,
+      UserWriteCallback* user_write_cb, uint64_t* log_used,
       const uint64_t log_ref, uint64_t* seq_used, const size_t sub_batch_cnt,
       PreReleaseCallback* pre_release_callback, const AssignOrder assign_order,
       const PublishLastSeq publish_last_seq, const bool disable_memtable);
@@ -1643,6 +1657,7 @@ class DBImpl : public DB {
   friend class ForwardIterator;
   friend struct SuperVersion;
   friend class CompactedDBImpl;
+  friend class DBImplFollower;
 #ifndef NDEBUG
   friend class DBTest_ConcurrentFlushWAL_Test;
   friend class DBTest_MixedSlowdownOptionsStop_Test;
@@ -1914,7 +1929,7 @@ class DBImpl : public DB {
   void ReleaseFileNumberFromPendingOutputs(
       std::unique_ptr<std::list<uint64_t>::iterator>& v);
 
-  IOStatus SyncClosedLogs(const WriteOptions& write_options,
+  IOStatus SyncClosedWals(const WriteOptions& write_options,
                           JobContext* job_context, VersionEdit* synced_wals,
                           bool error_recovery_in_prog);
 
@@ -2048,17 +2063,22 @@ class DBImpl : public DB {
       mutex_.Lock();
     }
 
-    if (!immutable_db_options_.unordered_write) {
-      // Then the writes are finished before the next write group starts
-      return;
+    if (immutable_db_options_.unordered_write) {
+      // Wait for the ones who already wrote to the WAL to finish their
+      // memtable write.
+      if (pending_memtable_writes_.load() != 0) {
+        // XXX: suspicious wait while holding DB mutex?
+        std::unique_lock<std::mutex> guard(switch_mutex_);
+        switch_cv_.wait(guard,
+                        [&] { return pending_memtable_writes_.load() == 0; });
+      }
+    } else {
+      // (Writes are finished before the next write group starts.)
     }
 
-    // Wait for the ones who already wrote to the WAL to finish their
-    // memtable write.
-    if (pending_memtable_writes_.load() != 0) {
-      std::unique_lock<std::mutex> guard(switch_mutex_);
-      switch_cv_.wait(guard,
-                      [&] { return pending_memtable_writes_.load() == 0; });
+    // Wait for any LockWAL to clear
+    while (lock_wal_count_ > 0) {
+      bg_cv_.Wait();
     }
   }
 
@@ -2243,6 +2263,11 @@ class DBImpl : public DB {
   // Pick the first unthrottled compaction with task token from queue.
   ColumnFamilyData* PickCompactionFromQueue(
       std::unique_ptr<TaskLimiterToken>* token, LogBuffer* log_buffer);
+
+  IOStatus SyncWalImpl(bool include_current_wal,
+                       const WriteOptions& write_options,
+                       JobContext* job_context, VersionEdit* synced_wals,
+                       bool error_recovery_in_prog);
 
   // helper function to call after some of the logs_ were synced
   void MarkLogsSynced(uint64_t up_to, bool synced_dir, VersionEdit* edit);
@@ -2568,7 +2593,7 @@ class DBImpl : public DB {
   // 8. read by MarkLogsNotSynced() and MarkLogsSynced() are protected by
   //    log_write_mutex_.
   // 9. erase() by MarkLogsSynced() protected by log_write_mutex_.
-  // 10. read by SyncClosedLogs() protected by only log_write_mutex_. This can
+  // 10. read by SyncClosedWals() protected by only log_write_mutex_. This can
   //     happen in bg flush threads after DB::Open() returns success to
   //     applications.
   // 11. reads, e.g. front(), iteration, and back() called by PreprocessWrite()
@@ -2581,7 +2606,7 @@ class DBImpl : public DB {
   // 13. emplace_back() by SwitchMemtable() hold both mutex_ and
   //     log_write_mutex_. This happens in the write group leader. Can conflict
   //     with bg threads calling FindObsoleteFiles(), MarkLogsSynced(),
-  //     SyncClosedLogs(), etc. as well as application threads calling
+  //     SyncClosedWals(), etc. as well as application threads calling
   //     FlushWAL(), SyncWAL(), LockWAL(). This is fine because all parties
   //     require at least log_write_mutex_.
   // 14. iteration called in WriteToWAL(write_group) protected by
@@ -2987,9 +3012,9 @@ inline Status DBImpl::FailIfReadCollapsedHistory(const ColumnFamilyData* cfd,
   if (!full_history_ts_low.empty() &&
       ucmp->CompareTimestamp(ts, full_history_ts_low) < 0) {
     std::stringstream oss;
-    oss << "Read timestamp: " << ts.ToString(true)
+    oss << "Read timestamp: " << ucmp->TimestampToString(ts)
         << " is smaller than full_history_ts_low: "
-        << Slice(full_history_ts_low).ToString(true) << std::endl;
+        << ucmp->TimestampToString(full_history_ts_low) << std::endl;
     return Status::InvalidArgument(oss.str());
   }
   return Status::OK();

@@ -727,6 +727,8 @@ extern ROCKSDB_LIBRARY_API const char* rocksdb_iter_timestamp(
     const rocksdb_iterator_t*, size_t* tslen);
 extern ROCKSDB_LIBRARY_API void rocksdb_iter_get_error(
     const rocksdb_iterator_t*, char** errptr);
+extern ROCKSDB_LIBRARY_API void rocksdb_iter_refresh(
+    const rocksdb_iterator_t* iter, char** errptr);
 
 extern ROCKSDB_LIBRARY_API void rocksdb_wal_iter_next(
     rocksdb_wal_iterator_t* iter);
@@ -747,6 +749,10 @@ extern ROCKSDB_LIBRARY_API rocksdb_writebatch_t* rocksdb_writebatch_create(
     void);
 extern ROCKSDB_LIBRARY_API rocksdb_writebatch_t* rocksdb_writebatch_create_from(
     const char* rep, size_t size);
+extern ROCKSDB_LIBRARY_API rocksdb_writebatch_t*
+rocksdb_writebatch_create_with_params(size_t reserved_bytes, size_t max_bytes,
+                                      size_t protection_bytes_per_key,
+                                      size_t default_cf_ts_sz);
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_destroy(
     rocksdb_writebatch_t*);
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_clear(rocksdb_writebatch_t*);
@@ -842,6 +848,9 @@ extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_rollback_to_save_point(
     rocksdb_writebatch_t*, char** errptr);
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_pop_save_point(
     rocksdb_writebatch_t*, char** errptr);
+extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_update_timestamps(
+    rocksdb_writebatch_t* wb, const char* ts, size_t tslen, void* state,
+    size_t (*get_ts_size)(void*, uint32_t), char** errptr);
 
 /* Write batch with index */
 
@@ -850,6 +859,11 @@ rocksdb_writebatch_wi_create(size_t reserved_bytes,
                              unsigned char overwrite_keys);
 extern ROCKSDB_LIBRARY_API rocksdb_writebatch_wi_t*
 rocksdb_writebatch_wi_create_from(const char* rep, size_t size);
+extern ROCKSDB_LIBRARY_API rocksdb_writebatch_wi_t*
+rocksdb_writebatch_wi_create_with_params(
+    rocksdb_comparator_t* backup_index_comparator, size_t reserved_bytes,
+    unsigned char overwrite_key, size_t max_bytes,
+    size_t protection_bytes_per_key);
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_wi_destroy(
     rocksdb_writebatch_wi_t*);
 extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_wi_clear(
@@ -960,6 +974,9 @@ extern ROCKSDB_LIBRARY_API rocksdb_iterator_t*
 rocksdb_writebatch_wi_create_iterator_with_base_cf(
     rocksdb_writebatch_wi_t* wbwi, rocksdb_iterator_t* base_iterator,
     rocksdb_column_family_handle_t* cf);
+extern ROCKSDB_LIBRARY_API void rocksdb_writebatch_wi_update_timestamps(
+    rocksdb_writebatch_wi_t* wbwi, const char* ts, size_t tslen, void* state,
+    size_t (*get_ts_size)(void*, uint32_t), char** errptr);
 
 /* Options utils */
 
@@ -1064,6 +1081,21 @@ rocksdb_block_based_options_set_pin_top_level_index_and_filter(
     rocksdb_block_based_table_options_t*, unsigned char);
 extern ROCKSDB_LIBRARY_API void rocksdb_options_set_block_based_table_factory(
     rocksdb_options_t* opt, rocksdb_block_based_table_options_t* table_options);
+enum {
+  rocksdb_block_based_k_fallback_pinning_tier = 0,
+  rocksdb_block_based_k_none_pinning_tier = 1,
+  rocksdb_block_based_k_flush_and_similar_pinning_tier = 2,
+  rocksdb_block_based_k_all_pinning_tier = 3,
+};
+extern ROCKSDB_LIBRARY_API void
+rocksdb_block_based_options_set_top_level_index_pinning_tier(
+    rocksdb_block_based_table_options_t*, int);
+extern ROCKSDB_LIBRARY_API void
+rocksdb_block_based_options_set_partition_pinning_tier(
+    rocksdb_block_based_table_options_t*, int);
+extern ROCKSDB_LIBRARY_API void
+rocksdb_block_based_options_set_unpartitioned_pinning_tier(
+    rocksdb_block_based_table_options_t*, int);
 extern ROCKSDB_LIBRARY_API void rocksdb_options_set_write_buffer_manager(
     rocksdb_options_t* opt, rocksdb_write_buffer_manager_t* wbm);
 
@@ -1681,6 +1713,18 @@ extern ROCKSDB_LIBRARY_API void rocksdb_options_set_wal_compression(
     rocksdb_options_t* opt, int);
 extern ROCKSDB_LIBRARY_API int rocksdb_options_get_wal_compression(
     rocksdb_options_t* opt);
+
+enum {
+  rocksdb_k_by_compensated_size_compaction_pri = 0,
+  rocksdb_k_oldest_largest_seq_first_compaction_pri = 1,
+  rocksdb_k_oldest_smallest_seq_first_compaction_pri = 2,
+  rocksdb_k_min_overlapping_ratio_compaction_pri = 3,
+  rocksdb_k_round_robin_compaction_pri = 4
+};
+extern ROCKSDB_LIBRARY_API void rocksdb_options_set_compaction_pri(
+    rocksdb_options_t*, int);
+extern ROCKSDB_LIBRARY_API int rocksdb_options_get_compaction_pri(
+    rocksdb_options_t*);
 
 /* RateLimiter */
 extern ROCKSDB_LIBRARY_API rocksdb_ratelimiter_t* rocksdb_ratelimiter_create(

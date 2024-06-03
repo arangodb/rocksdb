@@ -116,89 +116,19 @@ bool DBImpl::ShouldRescheduleFlushRequestToRetainUDT(
   return true;
 }
 
-IOStatus DBImpl::SyncClosedLogs(const WriteOptions& write_options,
+IOStatus DBImpl::SyncClosedWals(const WriteOptions& write_options,
                                 JobContext* job_context,
                                 VersionEdit* synced_wals,
                                 bool error_recovery_in_prog) {
-  TEST_SYNC_POINT("DBImpl::SyncClosedLogs:Start");
-  InstrumentedMutexLock l(&log_write_mutex_);
-  autovector<log::Writer*, 1> logs_to_sync;
-  uint64_t current_log_number = logfile_number_;
-  while (logs_.front().number < current_log_number &&
-         logs_.front().IsSyncing()) {
-    log_sync_cv_.Wait();
+  TEST_SYNC_POINT("DBImpl::SyncClosedWals:Start");
+
+  IOStatus io_s = SyncWalImpl(/*include_current_wal*/ false, write_options,
+                              job_context, synced_wals, error_recovery_in_prog);
+  if (!io_s.ok()) {
+    TEST_SYNC_POINT("DBImpl::SyncClosedWals:Failed");
+  } else {
+    TEST_SYNC_POINT("DBImpl::SyncClosedWals:end");
   }
-  for (auto it = logs_.begin();
-       it != logs_.end() && it->number < current_log_number; ++it) {
-    auto& log = *it;
-    log.PrepareForSync();
-    logs_to_sync.push_back(log.writer);
-  }
-
-  IOStatus io_s;
-  if (!logs_to_sync.empty()) {
-    log_write_mutex_.Unlock();
-
-    assert(job_context);
-
-    for (log::Writer* log : logs_to_sync) {
-      ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                     "[JOB %d] Syncing log #%" PRIu64, job_context->job_id,
-                     log->get_log_number());
-      if (error_recovery_in_prog) {
-        log->file()->reset_seen_error();
-      }
-
-      IOOptions io_options;
-      io_s = WritableFileWriter::PrepareIOOptions(write_options, io_options);
-      if (!io_s.ok()) {
-        break;
-      }
-      io_s = log->file()->Sync(io_options, immutable_db_options_.use_fsync);
-      if (!io_s.ok()) {
-        break;
-      }
-
-      if (immutable_db_options_.recycle_log_file_num > 0) {
-        if (error_recovery_in_prog) {
-          log->file()->reset_seen_error();
-        }
-        // Normally the log file is closed when purging obsolete file, but if
-        // log recycling is enabled, the log file is closed here so that it
-        // can be reused.
-        io_s = log->Close(write_options);
-        if (!io_s.ok()) {
-          break;
-        }
-      }
-    }
-    if (io_s.ok()) {
-      IOOptions io_options;
-      io_s = WritableFileWriter::PrepareIOOptions(write_options, io_options);
-      if (io_s.ok()) {
-        io_s = directories_.GetWalDir()->FsyncWithDirOptions(
-            io_options, nullptr,
-            DirFsyncOptions(DirFsyncOptions::FsyncReason::kNewFileSynced));
-      }
-    }
-
-    TEST_SYNC_POINT_CALLBACK("DBImpl::SyncClosedLogs:BeforeReLock",
-                             /*arg=*/nullptr);
-    log_write_mutex_.Lock();
-
-    // "number <= current_log_number - 1" is equivalent to
-    // "number < current_log_number".
-    if (io_s.ok()) {
-      MarkLogsSynced(current_log_number - 1, true, synced_wals);
-    } else {
-      MarkLogsNotSynced(current_log_number - 1);
-    }
-    if (!io_s.ok()) {
-      TEST_SYNC_POINT("DBImpl::SyncClosedLogs:Failed");
-      return io_s;
-    }
-  }
-  TEST_SYNC_POINT("DBImpl::SyncClosedLogs:end");
   return io_s;
 }
 
@@ -224,19 +154,25 @@ Status DBImpl::FlushMemTableToOutputFile(
   // the host crashes after flushing and before WAL is persistent, the
   // flushed SST may contain data from write batches whose updates to
   // other (unflushed) column families are missing.
+  //
+  // When 2PC is enabled, non-recent WAL(s) may be needed for crash-recovery,
+  // even when there is only one CF in the DB, for prepared transactions that
+  // had not been committed yet. Make sure we sync them to keep the persisted
+  // WAL state at least as new as the persisted SST state.
   const bool needs_to_sync_closed_wals =
       logfile_number_ > 0 &&
-      versions_->GetColumnFamilySet()->NumberOfColumnFamilies() > 1;
+      (versions_->GetColumnFamilySet()->NumberOfColumnFamilies() > 1 ||
+       allow_2pc());
 
   // If needs_to_sync_closed_wals is true, we need to record the current
   // maximum memtable ID of this column family so that a later PickMemtables()
   // call will not pick memtables whose IDs are higher. This is due to the fact
-  // that SyncClosedLogs() may release the db mutex, and memtable switch can
+  // that SyncClosedWals() may release the db mutex, and memtable switch can
   // happen for this column family in the meantime. The newly created memtables
   // have their data backed by unsynced WALs, thus they cannot be included in
   // this flush job.
   // Another reason why we must record the current maximum memtable ID of this
-  // column family: SyncClosedLogs() may release db mutex, thus it's possible
+  // column family: SyncClosedWals() may release db mutex, thus it's possible
   // for application to continue to insert into memtables increasing db's
   // sequence number. The application may take a snapshot, but this snapshot is
   // not included in `snapshot_seqs` which will be passed to flush job because
@@ -250,7 +186,7 @@ Status DBImpl::FlushMemTableToOutputFile(
 
   // If needs_to_sync_closed_wals is false, then the flush job will pick ALL
   // existing memtables of the column family when PickMemTable() is called
-  // later. Although we won't call SyncClosedLogs() in this case, we may still
+  // later. Although we won't call SyncClosedWals() in this case, we may still
   // call the callbacks of the listeners, i.e. NotifyOnFlushBegin() which also
   // releases and re-acquires the db mutex. In the meantime, the application
   // can still insert into the memtables and increase the db's sequence number.
@@ -280,12 +216,12 @@ Status DBImpl::FlushMemTableToOutputFile(
   bool need_cancel = false;
   IOStatus log_io_s = IOStatus::OK();
   if (needs_to_sync_closed_wals) {
-    // SyncClosedLogs() may unlock and re-lock the log_write_mutex multiple
+    // SyncClosedWals() may unlock and re-lock the log_write_mutex multiple
     // times.
     VersionEdit synced_wals;
     bool error_recovery_in_prog = error_handler_.IsRecoveryInProgress();
     mutex_.Unlock();
-    log_io_s = SyncClosedLogs(write_options, job_context, &synced_wals,
+    log_io_s = SyncClosedWals(write_options, job_context, &synced_wals,
                               error_recovery_in_prog);
     mutex_.Lock();
     if (log_io_s.ok() && synced_wals.IsWalAddition()) {
@@ -300,7 +236,7 @@ Status DBImpl::FlushMemTableToOutputFile(
       error_handler_.SetBGError(log_io_s, BackgroundErrorReason::kFlush);
     }
   } else {
-    TEST_SYNC_POINT("DBImpl::SyncClosedLogs:Skip");
+    TEST_SYNC_POINT("DBImpl::SyncClosedWals:Skip");
   }
   s = log_io_s;
 
@@ -574,7 +510,7 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
     VersionEdit synced_wals;
     bool error_recovery_in_prog = error_handler_.IsRecoveryInProgress();
     mutex_.Unlock();
-    log_io_s = SyncClosedLogs(write_options, job_context, &synced_wals,
+    log_io_s = SyncClosedWals(write_options, job_context, &synced_wals,
                               error_recovery_in_prog);
     mutex_.Lock();
     if (log_io_s.ok() && synced_wals.IsWalAddition()) {
@@ -1088,7 +1024,12 @@ Status DBImpl::IncreaseFullHistoryTsLowImpl(ColumnFamilyData* cfd,
   assert(ucmp->timestamp_size() == ts_low.size() && !ts_low.empty());
   if (!current_ts_low.empty() &&
       ucmp->CompareTimestamp(ts_low, current_ts_low) < 0) {
-    return Status::InvalidArgument("Cannot decrease full_history_ts_low");
+    std::stringstream oss;
+    oss << "Current full_history_ts_low: "
+        << ucmp->TimestampToString(current_ts_low)
+        << " is higher than provided ts: " << ucmp->TimestampToString(ts_low)
+        << std::endl;
+    return Status::InvalidArgument(oss.str());
   }
 
   Status s = versions_->LogAndApply(cfd, *cfd->GetLatestMutableCFOptions(),
@@ -1119,6 +1060,11 @@ Status DBImpl::CompactRangeInternal(const CompactRangeOptions& options,
 
   if (options.target_path_id >= cfd->ioptions()->cf_paths.size()) {
     return Status::InvalidArgument("Invalid target path ID");
+  }
+  if (options.change_level &&
+      cfd->ioptions()->compaction_style == kCompactionStyleFIFO) {
+    return Status::NotSupported(
+        "FIFO compaction does not support change_level.");
   }
 
   bool flush_needed = true;
@@ -1178,6 +1124,16 @@ Status DBImpl::CompactRangeInternal(const CompactRangeOptions& options,
     }
     s = RunManualCompaction(cfd, ColumnFamilyData::kCompactAllLevels,
                             final_output_level, options, begin, end, exclusive,
+                            false /* disable_trivial_move */,
+                            std::numeric_limits<uint64_t>::max(), trim_ts);
+  } else if (cfd->ioptions()->compaction_style == kCompactionStyleFIFO) {
+    // FIFOCompactionPicker::CompactRange() will ignore the input key range
+    // [begin, end] and just try to pick compaction based on the configured
+    // option `compaction_options_fifo`. So we skip checking if [begin, end]
+    // overlaps with the DB here.
+    final_output_level = 0;
+    s = RunManualCompaction(cfd, /*input_level=*/0, final_output_level, options,
+                            begin, end, exclusive,
                             false /* disable_trivial_move */,
                             std::numeric_limits<uint64_t>::max(), trim_ts);
   } else {
@@ -1264,8 +1220,7 @@ Status DBImpl::CompactRangeInternal(const CompactRangeOptions& options,
       CleanupSuperVersion(super_version);
     }
     if (s.ok() && first_overlapped_level != kInvalidLevel) {
-      if (cfd->ioptions()->compaction_style == kCompactionStyleUniversal ||
-          cfd->ioptions()->compaction_style == kCompactionStyleFIFO) {
+      if (cfd->ioptions()->compaction_style == kCompactionStyleUniversal) {
         assert(first_overlapped_level == 0);
         s = RunManualCompaction(
             cfd, first_overlapped_level, first_overlapped_level, options, begin,
@@ -1517,16 +1472,11 @@ Status DBImpl::CompactFilesImpl(
         std::to_string(cfd->ioptions()->num_levels - 1));
   }
 
-  Status s = cfd->compaction_picker()->SanitizeCompactionInputFiles(
-      &input_set, cf_meta, output_level);
-  TEST_SYNC_POINT("DBImpl::CompactFilesImpl::PostSanitizeCompactionInputFiles");
-  if (!s.ok()) {
-    return s;
-  }
-
   std::vector<CompactionInputFiles> input_files;
-  s = cfd->compaction_picker()->GetCompactionInputsFromFileNumbers(
-      &input_files, &input_set, version->storage_info(), compact_options);
+  Status s = cfd->compaction_picker()->SanitizeAndConvertCompactionInputFiles(
+      &input_set, cf_meta, output_level, version->storage_info(), &input_files);
+  TEST_SYNC_POINT(
+      "DBImpl::CompactFilesImpl::PostSanitizeAndConvertCompactionInputFiles");
   if (!s.ok()) {
     return s;
   }
@@ -3340,7 +3290,7 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
       bg_cv_.SignalAll();  // In case a waiter can proceed despite the error
       mutex_.Unlock();
       ROCKS_LOG_ERROR(immutable_db_options_.info_log,
-                      "[JOB %d] Waiting after background flush error: %s"
+                      "[JOB %d] Waiting after background flush error: %s, "
                       "Accumulated background error counts: %" PRIu64,
                       job_context.job_id, s.ToString().c_str(), error_cnt);
       log_buffer.FlushBufferToLog();
