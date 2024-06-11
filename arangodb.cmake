@@ -67,3 +67,8 @@ if (MSVC)
 endif ()
 set(USE_RTTI ON CACHE BOOL "enable RTTI")
 
+# note: the actual timestamp does not matter here. we only want it to be
+# a fixed value, so that building at different timestamps produces the same
+# binary executable and build id. 
+# the build date of RocksDB is not used by ArangoDB at all.
+set(BUILD_DATE "2024-06-10 17:48:39" CACHE STRING "the time we first built rocksdb")
