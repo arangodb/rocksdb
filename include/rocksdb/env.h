@@ -33,6 +33,7 @@
 #ifdef _WIN32
 // Windows API macro interference
 #undef DeleteFile
+#undef DeleteFileA
 #undef GetCurrentTime
 #undef LoadLibrary
 #endif
@@ -360,7 +361,7 @@ class Env : public Customizable {
                                            std::vector<FileAttributes>* result);
 
   // Delete the named file.
-  virtual Status DeleteFile(const std::string& fname) = 0;
+  virtual rocksdb::Status DeleteFile(const std::string& fname) = 0;
 
   // Truncate the named file to the specified size.
   virtual Status Truncate(const std::string& /*fname*/, size_t /*size*/) {
@@ -1458,8 +1459,8 @@ class EnvWrapper : public Env {
       const std::string& dir, std::vector<FileAttributes>* result) override {
     return target_.env->GetChildrenFileAttributes(dir, result);
   }
-  Status DeleteFile(const std::string& f) override {
-    return target_.env->DeleteFile(f);
+  virtual rocksdb::Status DeleteFile(const std::string& fname) override {
+    return target_.env->DeleteFile(fname);
   }
   Status Truncate(const std::string& fname, size_t size) override {
     return target_.env->Truncate(fname, size);
