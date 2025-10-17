@@ -49,21 +49,16 @@ class FullFilterBlockBuilder : public FilterBlockBuilder {
   // directly. and be deleted here
   ~FullFilterBlockBuilder() {}
 
-  virtual bool IsBlockBased() override { return false; }
-  virtual void StartBlock(uint64_t /*block_offset*/) override {}
-  virtual void Add(const Slice& key_without_ts) override;
-  virtual bool IsEmpty() const override { return !any_added_; }
-  virtual size_t EstimateEntriesAdded() override;
-  virtual Slice Finish(
-      const BlockHandle& tmp, Status* status,
-      std::unique_ptr<const char[]>* filter_data = nullptr) override;
+  void Add(const Slice& key_without_ts) override;
+  bool IsEmpty() const override { return !any_added_; }
+  size_t EstimateEntriesAdded() override;
+  Slice Finish(const BlockHandle& tmp, Status* status,
+               std::unique_ptr<const char[]>* filter_data = nullptr) override;
   using FilterBlockBuilder::Finish;
 
-  virtual void ResetFilterBitsBuilder() override {
-    filter_bits_builder_.reset();
-  }
+  void ResetFilterBitsBuilder() override { filter_bits_builder_.reset(); }
 
-  virtual Status MaybePostVerifyFilter(const Slice& filter_content) override {
+  Status MaybePostVerifyFilter(const Slice& filter_content) override {
     return filter_bits_builder_->MaybePostVerify(filter_content);
   }
 
@@ -74,6 +69,7 @@ class FullFilterBlockBuilder : public FilterBlockBuilder {
   void AddPrefix(const Slice& key);
   const SliceTransform* prefix_extractor() { return prefix_extractor_; }
   const std::string& last_prefix_str() const { return last_prefix_str_; }
+  bool need_last_prefix_;
 
  private:
   // important: all of these might point to invalid addresses
@@ -107,49 +103,40 @@ class FullFilterBlockReader
       FilePrefetchBuffer* prefetch_buffer, bool use_cache, bool prefetch,
       bool pin, BlockCacheLookupContext* lookup_context);
 
-  bool IsBlockBased() override { return false; }
+  bool KeyMayMatch(const Slice& key, const Slice* const const_ikey_ptr,
+                   GetContext* get_context,
+                   BlockCacheLookupContext* lookup_context,
+                   const ReadOptions& read_options) override;
 
-  bool KeyMayMatch(const Slice& key, const SliceTransform* prefix_extractor,
-                   uint64_t block_offset, const bool no_io,
-                   const Slice* const const_ikey_ptr, GetContext* get_context,
-                   BlockCacheLookupContext* lookup_context) override;
-
-  bool PrefixMayMatch(const Slice& prefix,
-                      const SliceTransform* prefix_extractor,
-                      uint64_t block_offset, const bool no_io,
-                      const Slice* const const_ikey_ptr,
+  bool PrefixMayMatch(const Slice& prefix, const Slice* const const_ikey_ptr,
                       GetContext* get_context,
-                      BlockCacheLookupContext* lookup_context) override;
+                      BlockCacheLookupContext* lookup_context,
+                      const ReadOptions& read_options) override;
 
   void KeysMayMatch(MultiGetRange* range,
-                    const SliceTransform* prefix_extractor,
-                    uint64_t block_offset, const bool no_io,
-                    BlockCacheLookupContext* lookup_context) override;
+                    BlockCacheLookupContext* lookup_context,
+                    const ReadOptions& read_options) override;
+  // Used in partitioned filter code
+  void KeysMayMatch2(MultiGetRange* range,
+                     const SliceTransform* /*prefix_extractor*/,
+                     BlockCacheLookupContext* lookup_context,
+                     const ReadOptions& read_options) {
+    KeysMayMatch(range, lookup_context, read_options);
+  }
 
   void PrefixesMayMatch(MultiGetRange* range,
                         const SliceTransform* prefix_extractor,
-                        uint64_t block_offset, const bool no_io,
-                        BlockCacheLookupContext* lookup_context) override;
+                        BlockCacheLookupContext* lookup_context,
+                        const ReadOptions& read_options) override;
   size_t ApproximateMemoryUsage() const override;
-  bool RangeMayExist(const Slice* iterate_upper_bound, const Slice& user_key,
-                     const SliceTransform* prefix_extractor,
-                     const Comparator* comparator,
-                     const Slice* const const_ikey_ptr, bool* filter_checked,
-                     bool need_upper_bound_check, bool no_io,
-                     BlockCacheLookupContext* lookup_context) override;
 
  private:
-  bool MayMatch(const Slice& entry, bool no_io, GetContext* get_context,
-                BlockCacheLookupContext* lookup_context) const;
-  void MayMatch(MultiGetRange* range, bool no_io,
-                const SliceTransform* prefix_extractor,
-                BlockCacheLookupContext* lookup_context) const;
-  bool IsFilterCompatible(const Slice* iterate_upper_bound, const Slice& prefix,
-                          const Comparator* comparator) const;
-
- private:
-  bool full_length_enabled_;
-  size_t prefix_extractor_full_length_;
+  bool MayMatch(const Slice& entry, GetContext* get_context,
+                BlockCacheLookupContext* lookup_context,
+                const ReadOptions& read_options) const;
+  void MayMatch(MultiGetRange* range, const SliceTransform* prefix_extractor,
+                BlockCacheLookupContext* lookup_context,
+                const ReadOptions& read_options) const;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

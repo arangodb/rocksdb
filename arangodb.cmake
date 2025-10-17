@@ -7,10 +7,6 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-suggest-override")
 endif()
 
-# we want the following definitions to be in effect for both rocksdb and arangodb
-add_definitions("-DNROCKSDB_THREAD_STATUS")
-add_definitions("-DROCKSDB_SUPPORT_THREAD_LOCAL")
-
 # IPO_ENABLED is set by the top-level CMakeLists.txt file
 if (IPO_ENABLED)
   set(CMAKE_INTERPROCEDURAL_OPTIMIZATION True)
@@ -44,6 +40,15 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|AARCH64")
   set(FORCE_SSE42 OFF CACHE BOOL "force building with SSE4.2, even when PORTABLE=ON" FORCE)
   set(FORCE_AVX OFF CACHE BOOL "force building with AVX, even when PORTABLE=ON" FORCE)
+endif ()
+
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+  set(PORTABLE "sandybridge" CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|AARCH64")
+  set(PORTABLE 1 CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
+else ()
+  message(WARNING "unknown architecture") 
+  set(PORTABLE 1 CACHE BOOL "enable portable rocksdb build (disabling might yield better performance but break portability)" FORCE)
 endif ()
 
 set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "build shared libraries")

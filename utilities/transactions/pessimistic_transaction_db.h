@@ -4,7 +4,6 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #pragma once
-#ifndef ROCKSDB_LITE
 
 #include <mutex>
 #include <queue>
@@ -37,7 +36,7 @@ class PessimisticTransactionDB : public TransactionDB {
 
   virtual ~PessimisticTransactionDB();
 
-  virtual const Snapshot* GetSnapshot() override { return db_->GetSnapshot(); }
+  const Snapshot* GetSnapshot() override { return db_->GetSnapshot(); }
 
   virtual Status Initialize(
       const std::vector<size_t>& compaction_enabled_cf_indices,
@@ -48,54 +47,101 @@ class PessimisticTransactionDB : public TransactionDB {
                                 Transaction* old_txn) override = 0;
 
   using StackableDB::Put;
-  virtual Status Put(const WriteOptions& options,
-                     ColumnFamilyHandle* column_family, const Slice& key,
-                     const Slice& val) override;
+  Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
+             const Slice& key, const Slice& val) override;
+
+  Status PutEntity(const WriteOptions& options,
+                   ColumnFamilyHandle* column_family, const Slice& key,
+                   const WideColumns& columns) override;
+  Status PutEntity(const WriteOptions& /* options */, const Slice& /* key */,
+                   const AttributeGroups& attribute_groups) override {
+    if (attribute_groups.empty()) {
+      return Status::InvalidArgument(
+          "Cannot call this method without attribute groups");
+    }
+    return Status::NotSupported(
+        "PutEntity with AttributeGroups not supported by "
+        "PessimisticTransactionDB");
+  }
 
   using StackableDB::Delete;
-  virtual Status Delete(const WriteOptions& wopts,
-                        ColumnFamilyHandle* column_family,
-                        const Slice& key) override;
+  Status Delete(const WriteOptions& wopts, ColumnFamilyHandle* column_family,
+                const Slice& key) override;
 
   using StackableDB::SingleDelete;
-  virtual Status SingleDelete(const WriteOptions& wopts,
-                              ColumnFamilyHandle* column_family,
-                              const Slice& key) override;
+  Status SingleDelete(const WriteOptions& wopts,
+                      ColumnFamilyHandle* column_family,
+                      const Slice& key) override;
 
   using StackableDB::Merge;
-  virtual Status Merge(const WriteOptions& options,
-                       ColumnFamilyHandle* column_family, const Slice& key,
-                       const Slice& value) override;
+  Status Merge(const WriteOptions& options, ColumnFamilyHandle* column_family,
+               const Slice& key, const Slice& value) override;
 
   using TransactionDB::Write;
-  virtual Status Write(const WriteOptions& opts, WriteBatch* updates) override;
+  Status Write(const WriteOptions& opts, WriteBatch* updates) override;
   inline Status WriteWithConcurrencyControl(const WriteOptions& opts,
                                             WriteBatch* updates) {
-    // Need to lock all keys in this batch to prevent write conflicts with
-    // concurrent transactions.
-    Transaction* txn = BeginInternalTransaction(opts);
-    txn->DisableIndexing();
+    Status s;
+    if (opts.protection_bytes_per_key > 0) {
+      s = WriteBatchInternal::UpdateProtectionInfo(
+          updates, opts.protection_bytes_per_key);
+    }
+    if (s.ok()) {
+      // Need to lock all keys in this batch to prevent write conflicts with
+      // concurrent transactions.
+      Transaction* txn = BeginInternalTransaction(opts);
+      txn->DisableIndexing();
 
-    auto txn_impl = static_cast_with_check<PessimisticTransaction>(txn);
+      auto txn_impl = static_cast_with_check<PessimisticTransaction>(txn);
 
-    // Since commitBatch sorts the keys before locking, concurrent Write()
-    // operations will not cause a deadlock.
-    // In order to avoid a deadlock with a concurrent Transaction, Transactions
-    // should use a lock timeout.
-    Status s = txn_impl->CommitBatch(updates);
+      // Since commitBatch sorts the keys before locking, concurrent Write()
+      // operations will not cause a deadlock.
+      // In order to avoid a deadlock with a concurrent Transaction,
+      // Transactions should use a lock timeout.
+      s = txn_impl->CommitBatch(updates);
 
-    delete txn;
+      delete txn;
+    }
 
     return s;
   }
 
   using StackableDB::CreateColumnFamily;
-  virtual Status CreateColumnFamily(const ColumnFamilyOptions& options,
-                                    const std::string& column_family_name,
-                                    ColumnFamilyHandle** handle) override;
+  Status CreateColumnFamily(const ColumnFamilyOptions& options,
+                            const std::string& column_family_name,
+                            ColumnFamilyHandle** handle) override;
+
+  Status CreateColumnFamilies(
+      const ColumnFamilyOptions& options,
+      const std::vector<std::string>& column_family_names,
+      std::vector<ColumnFamilyHandle*>* handles) override;
+
+  Status CreateColumnFamilies(
+      const std::vector<ColumnFamilyDescriptor>& column_families,
+      std::vector<ColumnFamilyHandle*>* handles) override;
+
+  using StackableDB::CreateColumnFamilyWithImport;
+  Status CreateColumnFamilyWithImport(
+      const ColumnFamilyOptions& options, const std::string& column_family_name,
+      const ImportColumnFamilyOptions& import_options,
+      const ExportImportFilesMetaData& metadata,
+      ColumnFamilyHandle** handle) override {
+    const std::vector<const ExportImportFilesMetaData*>& metadatas{&metadata};
+    return CreateColumnFamilyWithImport(options, column_family_name,
+                                        import_options, metadatas, handle);
+  }
+
+  Status CreateColumnFamilyWithImport(
+      const ColumnFamilyOptions& options, const std::string& column_family_name,
+      const ImportColumnFamilyOptions& import_options,
+      const std::vector<const ExportImportFilesMetaData*>& metadatas,
+      ColumnFamilyHandle** handle) override;
 
   using StackableDB::DropColumnFamily;
-  virtual Status DropColumnFamily(ColumnFamilyHandle* column_family) override;
+  Status DropColumnFamily(ColumnFamilyHandle* column_family) override;
+
+  Status DropColumnFamilies(
+      const std::vector<ColumnFamilyHandle*>& column_families) override;
 
   Status TryLock(PessimisticTransaction* txn, uint32_t cfh_id,
                  const std::string& key, bool exclusive);
@@ -149,6 +195,18 @@ class PessimisticTransactionDB : public TransactionDB {
   const LockTrackerFactory& GetLockTrackerFactory() const {
     return lock_manager_->GetLockTrackerFactory();
   }
+
+  std::pair<Status, std::shared_ptr<const Snapshot>> CreateTimestampedSnapshot(
+      TxnTimestamp ts) override;
+
+  std::shared_ptr<const Snapshot> GetTimestampedSnapshot(
+      TxnTimestamp ts) const override;
+
+  void ReleaseTimestampedSnapshotsOlderThan(TxnTimestamp ts) override;
+
+  Status GetTimestampedSnapshots(TxnTimestamp ts_lb, TxnTimestamp ts_ub,
+                                 std::vector<std::shared_ptr<const Snapshot>>&
+                                     timestamped_snapshots) const override;
 
  protected:
   DBImpl* db_impl_;
@@ -224,10 +282,10 @@ class WriteCommittedTxnDB : public PessimisticTransactionDB {
   // Optimized version of ::Write that makes use of skip_concurrency_control
   // hint
   using TransactionDB::Write;
-  virtual Status Write(const WriteOptions& opts,
-                       const TransactionDBWriteOptimizations& optimizations,
-                       WriteBatch* updates) override;
-  virtual Status Write(const WriteOptions& opts, WriteBatch* updates) override;
+  Status Write(const WriteOptions& opts,
+               const TransactionDBWriteOptimizations& optimizations,
+               WriteBatch* updates) override;
+  Status Write(const WriteOptions& opts, WriteBatch* updates) override;
 };
 
 inline Status PessimisticTransactionDB::FailIfBatchHasTs(
@@ -255,5 +313,32 @@ inline Status PessimisticTransactionDB::FailIfCfEnablesTs(
   return Status::OK();
 }
 
+class SnapshotCreationCallback : public PostMemTableCallback {
+ public:
+  explicit SnapshotCreationCallback(
+      DBImpl* dbi, TxnTimestamp commit_ts,
+      const std::shared_ptr<TransactionNotifier>& notifier,
+      std::shared_ptr<const Snapshot>& snapshot)
+      : db_impl_(dbi),
+        commit_ts_(commit_ts),
+        snapshot_notifier_(notifier),
+        snapshot_(snapshot) {
+    assert(db_impl_);
+  }
+
+  ~SnapshotCreationCallback() override {
+    snapshot_creation_status_.PermitUncheckedError();
+  }
+
+  Status operator()(SequenceNumber seq, bool disable_memtable) override;
+
+ private:
+  DBImpl* const db_impl_;
+  const TxnTimestamp commit_ts_;
+  std::shared_ptr<TransactionNotifier> snapshot_notifier_;
+  std::shared_ptr<const Snapshot>& snapshot_;
+
+  Status snapshot_creation_status_;
+};
+
 }  // namespace ROCKSDB_NAMESPACE
-#endif  // ROCKSDB_LITE

@@ -53,6 +53,7 @@ struct ConfigOptions;
 using AccessPattern = RandomAccessFile::AccessPattern;
 using FileAttributes = Env::FileAttributes;
 
+// DEPRECATED
 // Priority of an IO request. This is a hint and does not guarantee any
 // particular QoS.
 // IO_LOW - Typically background reads/writes such as compaction/flush
@@ -78,6 +79,17 @@ enum class IOType : uint8_t {
   kInvalid,
 };
 
+// enum representing various operations supported by underlying FileSystem.
+// These need to be set in SupportedOps API for RocksDB to use them.
+enum FSSupportedOps {
+  kAsyncIO,   // Supports async reads
+  kFSBuffer,  // Supports handing off the file system allocated read buffer
+              // to the caller of Read/MultiRead
+  kVerifyAndReconstructRead,  // Supports a higher level of data integrity. See
+                              // the verify_and_reconstruct_read flag in
+                              // IOOptions.
+};
+
 // Per-request options that can be passed down to the FileSystem
 // implementation. These are hints and are not necessarily guaranteed to be
 // honored. More hints can be added here in the future to indicate things like
@@ -86,6 +98,7 @@ struct IOOptions {
   // Timeout for the operation in microseconds
   std::chrono::microseconds timeout;
 
+  // DEPRECATED
   // Priority - high or low
   IOPriority prio;
 
@@ -110,6 +123,25 @@ struct IOOptions {
   // fsync, set this to force the fsync
   bool force_dir_fsync;
 
+  // Can be used by underlying file systems to skip recursing through sub
+  // directories and list only files in GetChildren API.
+  bool do_not_recurse;
+
+  // Setting this flag indicates a corruption was detected by a previous read,
+  // so the caller wants to re-read the data with much stronger data integrity
+  // checking and correction, i.e requests the file system to reconstruct the
+  // data from redundant copies and verify checksums, if available, in order
+  // to have a better chance of success. It is expected that this will have a
+  // much higher overhead than a normal read.
+  // This is a hint. At a minimum, the file system should implement this flag in
+  // FSRandomAccessFile::Read and FSSequentialFile::Read
+  // NOTE: The file system must support kVerifyAndReconstructRead in
+  // FSSupportedOps, otherwise this feature will not be used.
+  bool verify_and_reconstruct_read;
+
+  // EXPERIMENTAL
+  Env::IOActivity io_activity = Env::IOActivity::kUnknown;
+
   IOOptions() : IOOptions(false) {}
 
   explicit IOOptions(bool force_dir_fsync_)
@@ -117,7 +149,9 @@ struct IOOptions {
         prio(IOPriority::kIOLow),
         rate_limiter_priority(Env::IO_TOTAL),
         type(IOType::kUnknown),
-        force_dir_fsync(force_dir_fsync_) {}
+        force_dir_fsync(force_dir_fsync_),
+        do_not_recurse(false),
+        verify_and_reconstruct_read(false) {}
 };
 
 struct DirFsyncOptions {
@@ -266,12 +300,6 @@ class FileSystem : public Customizable {
   static const char* kDefaultName() { return "DefaultFileSystem"; }
 
   // Loads the FileSystem specified by the input value into the result
-  // The CreateFromString alternative should be used; this method may be
-  // deprecated in a future release.
-  static Status Load(const std::string& value,
-                     std::shared_ptr<FileSystem>* result);
-
-  // Loads the FileSystem specified by the input value into the result
   // @see Customizable for a more detailed description of the parameters and
   // return codes
   // @param config_options Controls how the FileSystem is loaded
@@ -337,8 +365,7 @@ class FileSystem : public Customizable {
   // The returned file may be concurrently accessed by multiple threads.
   virtual IOStatus NewRandomAccessFile(
       const std::string& fname, const FileOptions& file_opts,
-      std::unique_ptr<FSRandomAccessFile>* result,
-      IODebugContext* dbg) = 0;
+      std::unique_ptr<FSRandomAccessFile>* result, IODebugContext* dbg) = 0;
   // These values match Linux definition
   // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/fcntl.h#n56
   enum WriteLifeTimeHint {
@@ -384,7 +411,7 @@ class FileSystem : public Customizable {
                                      IODebugContext* dbg);
 
   // Open `fname` for random read and write, if file doesn't exist the file
-  // will be created.  On success, stores a pointer to the new file in
+  // will not be created.  On success, stores a pointer to the new file in
   // *result and returns OK.  On failure returns non-OK.
   //
   // The returned file will only be accessed by one thread at a time.
@@ -490,7 +517,8 @@ class FileSystem : public Customizable {
   virtual IOStatus Truncate(const std::string& /*fname*/, size_t /*size*/,
                             const IOOptions& /*options*/,
                             IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("Truncate is not supported for this FileSystem");
+    return IOStatus::NotSupported(
+        "Truncate is not supported for this FileSystem");
   }
 
   // Create the specified directory. Returns error if directory exists.
@@ -527,7 +555,8 @@ class FileSystem : public Customizable {
                             const std::string& /*target*/,
                             const IOOptions& /*options*/,
                             IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("LinkFile is not supported for this FileSystem");
+    return IOStatus::NotSupported(
+        "LinkFile is not supported for this FileSystem");
   }
 
   virtual IOStatus NumFileLinks(const std::string& /*fname*/,
@@ -541,7 +570,8 @@ class FileSystem : public Customizable {
                                 const std::string& /*second*/,
                                 const IOOptions& /*options*/, bool* /*res*/,
                                 IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("AreFilesSame is not supported for this FileSystem");
+    return IOStatus::NotSupported(
+        "AreFilesSame is not supported for this FileSystem");
   }
 
   // Lock the specified file.  Used to prevent concurrent access to
@@ -579,7 +609,7 @@ class FileSystem : public Customizable {
   // logger.
   virtual IOStatus NewLogger(const std::string& fname, const IOOptions& io_opts,
                              std::shared_ptr<Logger>* result,
-                             IODebugContext* dbg) = 0;
+                             IODebugContext* dbg);
 
   // Get full directory name for this db.
   virtual IOStatus GetAbsolutePath(const std::string& db_path,
@@ -605,7 +635,7 @@ class FileSystem : public Customizable {
   // the FileOptions in the parameters, but is optimized for writing log files.
   // Default implementation returns the copy of the same object.
   virtual FileOptions OptimizeForLogWrite(const FileOptions& file_options,
-                                         const DBOptions& db_options) const;
+                                          const DBOptions& db_options) const;
 
   // OptimizeForManifestWrite will create a new FileOptions object that is a
   // copy of the FileOptions in the parameters, but is optimized for writing
@@ -652,7 +682,6 @@ class FileSystem : public Customizable {
                                const IOOptions& options, bool* is_dir,
                                IODebugContext* /*dgb*/) = 0;
 
-  // EXPERIMENTAL
   // Poll for completion of read IO requests. The Poll() method should call the
   // callback functions to indicate completion of read requests.
   // Underlying FS is required to support Poll API. Poll implementation should
@@ -660,12 +689,42 @@ class FileSystem : public Customizable {
   // after the callback has been called.
   // If Poll returns partial results for any reads, its caller reponsibility to
   // call Read or ReadAsync in order to get the remaining bytes.
-  //
-  // Default implementation is to return IOStatus::OK.
-
   virtual IOStatus Poll(std::vector<void*>& /*io_handles*/,
                         size_t /*min_completions*/) {
     return IOStatus::OK();
+  }
+
+  // Abort the read IO requests submitted asynchronously. Underlying FS is
+  // required to support AbortIO API. AbortIO implementation should ensure that
+  // the all the read requests related to io_handles should be aborted and
+  // it shouldn't call the callback for these io_handles.
+  virtual IOStatus AbortIO(std::vector<void*>& /*io_handles*/) {
+    return IOStatus::OK();
+  }
+
+  // EXPERIMENTAL
+  // Discard any directory metadata cached in memory for the specified
+  // directory and its descendants. Useful for distributed file systems
+  // where the local cache may be out of sync with the actual directory state.
+  //
+  // The implementation is not required to be thread safe. Its the caller's
+  // responsibility to ensure that no directory operations happen
+  // concurrently.
+  virtual void DiscardCacheForDirectory(const std::string& /*path*/) {}
+
+  // Indicates to upper layers which FileSystem operations mentioned in
+  // FSSupportedOps are supported by underlying FileSystem. Each bit in
+  // supported_ops argument represent corresponding FSSupportedOps operation.
+  // Foreg:
+  //  If async_io is supported by the underlying FileSystem, then supported_ops
+  //  will have corresponding bit (i.e FSSupportedOps::kAsyncIO) set to 1.
+  //
+  // By default, async_io operation is set and FS should override this API and
+  // set all the operations they support provided in FSSupportedOps (including
+  // async_io).
+  virtual void SupportedOps(int64_t& supported_ops) {
+    supported_ops = 0;
+    supported_ops |= (1 << FSSupportedOps::kAsyncIO);
   }
 
   // If you're adding methods here, remember to add them to EnvWrapper too.
@@ -740,6 +799,8 @@ class FSSequentialFile {
   // SequentialFileWrapper too.
 };
 
+using FSAllocationPtr = std::unique_ptr<void, std::function<void(void*)>>;
+
 // A read IO request structure for use in MultiRead and asynchronous Read APIs.
 struct FSReadRequest {
   // Input parameter that represents the file offset in bytes.
@@ -749,7 +810,7 @@ struct FSReadRequest {
   // returns fewer bytes if end of file is hit (or `status` is not OK).
   size_t len;
 
-  // A buffer that MultiRead()  can optionally place data in. It can
+  // A buffer that MultiRead() can optionally place data in. It can
   // ignore this and allocate its own buffer.
   // The lifecycle of scratch will be until IO is completed.
   //
@@ -771,6 +832,42 @@ struct FSReadRequest {
   // Output parameter set by underlying FileSystem that represents status of
   // read request.
   IOStatus status;
+
+  // fs_scratch is a data buffer allocated and provided by underlying FileSystem
+  // to RocksDB during reads, when FS wants to provide its own buffer with data
+  // instead of using RocksDB provided FSReadRequest::scratch.
+  //
+  // FileSystem needs to provide a buffer and custom delete function. The
+  // lifecycle of fs_scratch until data is used by RocksDB. The buffer
+  // should be released by RocksDB using custom delete function provided in
+  // unique_ptr fs_scratch.
+  //
+  // Optimization benefits:
+  // This is helpful in cases where underlying FileSystem has to do additional
+  // copy of data to RocksDB provided buffer which can consume CPU cycles. It
+  // can be optimized by avoiding copying to RocksDB buffer and directly using
+  // FS provided buffer.
+  //
+  // How to enable:
+  // In order to enable this option, FS needs to override SupportedOps() API and
+  // set FSSupportedOps::kFSBuffer in SupportedOps() as:
+  //  {
+  //    supported_ops |= (1 << FSSupportedOps::kFSBuffer);
+  //  }
+  //
+  // Work in progress:
+  // Right now it's only enabled for MultiReads (sync and async
+  // both) with non direct io.
+  // If RocksDB provide its own buffer (scratch) during reads, that's a
+  //  signal for FS to use RocksDB buffer.
+  // If FSSupportedOps::kFSBuffer is enabled and scratch == nullptr,
+  //   then FS have to provide its own buffer in fs_scratch.
+  //
+  // NOTE:
+  // - FSReadRequest::result should point to fs_scratch.
+  // - This is needed only if FSSupportedOps::kFSBuffer support is provided by
+  // underlying FS.
+  FSAllocationPtr fs_scratch;
 };
 
 // A file abstraction for randomly reading the contents of a file.
@@ -844,7 +941,7 @@ class FSRandomAccessFile {
   virtual size_t GetUniqueId(char* /*id*/, size_t /*max_size*/) const {
     return 0;  // Default implementation to prevent issues with backwards
                // compatibility.
-  };
+  }
 
   enum AccessPattern { kNormal, kRandom, kSequential, kWillNeed, kWontNeed };
 
@@ -865,7 +962,6 @@ class FSRandomAccessFile {
     return IOStatus::NotSupported("InvalidateCache not supported.");
   }
 
-  // EXPERIMENTAL
   // This API reads the requested data in FSReadRequest asynchronously. This is
   // a asynchronous call, i.e it should return after submitting the request.
   //
@@ -887,11 +983,21 @@ class FSRandomAccessFile {
   // request and result and status fields are output parameter set by underlying
   // FileSystem. The data should always be read into scratch field.
   //
+  // How to enable:
+  // In order to enable ReadAsync, FS needs to override SupportedOps() API and
+  // set FSSupportedOps::kAsyncIO in SupportedOps() as:
+  //  {
+  //    supported_ops |= (1 << FSSupportedOps::kAsyncIO);
+  //  }
+  //
+  // Note: If FS supports ReadAsync API, it should also override Poll and
+  // AbortIO API.
+  //
   // Default implementation is to read the data synchronously.
-  virtual IOStatus ReadAsync(
-      FSReadRequest& req, const IOOptions& opts,
-      std::function<void(const FSReadRequest&, void*)> cb, void* cb_arg,
-      void** /*io_handle*/, IOHandleDeleter* /*del_fn*/, IODebugContext* dbg) {
+  virtual IOStatus ReadAsync(FSReadRequest& req, const IOOptions& opts,
+                             std::function<void(FSReadRequest&, void*)> cb,
+                             void* cb_arg, void** /*io_handle*/,
+                             IOHandleDeleter* /*del_fn*/, IODebugContext* dbg) {
     req.status =
         Read(req.offset, req.len, opts, &(req.result), req.scratch, dbg);
     cb(req, cb_arg);
@@ -935,10 +1041,13 @@ class FSWritableFile {
         write_hint_(Env::WLTH_NOT_SET),
         strict_bytes_per_sync_(options.strict_bytes_per_sync) {}
 
+  // For cases when Close() hasn't been called, many derived classes of
+  // FSWritableFile will need to call Close() non-virtually in their destructor,
+  // and ignore the result, to ensure resources are released.
   virtual ~FSWritableFile() {}
 
   // Append data to the end of the file
-  // Note: A WriteableFile object must support either Append or
+  // Note: A WritableFile object must support either Append or
   // PositionedAppend, so the users cannot mix the two.
   virtual IOStatus Append(const Slice& data, const IOOptions& options,
                           IODebugContext* dbg) = 0;
@@ -1008,7 +1117,15 @@ class FSWritableFile {
                             IODebugContext* /*dbg*/) {
     return IOStatus::OK();
   }
-  virtual IOStatus Close(const IOOptions& options, IODebugContext* dbg) = 0;
+
+  // The caller should call Close() before destroying the FSWritableFile to
+  // surface any errors associated with finishing writes to the file.
+  // The file is considered closed regardless of return status.
+  // (However, implementations must also clean up properly in the destructor
+  // even if Close() is not called.)
+  virtual IOStatus Close(const IOOptions& /*options*/,
+                         IODebugContext* /*dbg*/) = 0;
+
   virtual IOStatus Flush(const IOOptions& options, IODebugContext* dbg) = 0;
   virtual IOStatus Sync(const IOOptions& options,
                         IODebugContext* dbg) = 0;  // sync data
@@ -1059,9 +1176,7 @@ class FSWritableFile {
    * Get the size of valid data in the file.
    */
   virtual uint64_t GetFileSize(const IOOptions& /*options*/,
-                               IODebugContext* /*dbg*/) {
-    return 0;
-  }
+                               IODebugContext* /*dbg*/) = 0;
 
   /*
    * Get and set the default pre-allocation block size for writes to
@@ -1163,6 +1278,9 @@ class FSRandomRWFile {
  public:
   FSRandomRWFile() {}
 
+  // For cases when Close() hasn't been called, many derived classes of
+  // FSRandomRWFile will need to call Close() non-virtually in their destructor,
+  // and ignore the result, to ensure resources are released.
   virtual ~FSRandomRWFile() {}
 
   // Indicates if the class makes use of direct I/O
@@ -1198,6 +1316,11 @@ class FSRandomRWFile {
     return Sync(options, dbg);
   }
 
+  // The caller should call Close() before destroying the FSRandomRWFile to
+  // surface any errors associated with finishing writes to the file.
+  // The file is considered closed regardless of return status.
+  // (However, implementations must also clean up properly in the destructor
+  // even if Close() is not called.)
   virtual IOStatus Close(const IOOptions& options, IODebugContext* dbg) = 0;
 
   // EXPERIMENTAL
@@ -1241,6 +1364,9 @@ class FSMemoryMappedFileBuffer {
 // filesystem operations that can be executed on directories.
 class FSDirectory {
  public:
+  // For cases when Close() hasn't been called, many derived classes of
+  // FSDirectory will need to call Close() non-virtually in their destructor,
+  // and ignore the result, to ensure resources are released.
   virtual ~FSDirectory() {}
   // Fsync directory. Can be called concurrently from multiple threads.
   virtual IOStatus Fsync(const IOOptions& options, IODebugContext* dbg) = 0;
@@ -1252,6 +1378,14 @@ class FSDirectory {
       const IOOptions& options, IODebugContext* dbg,
       const DirFsyncOptions& /*dir_fsync_options*/) {
     return Fsync(options, dbg);
+  }
+
+  // Calling Close() before destroying a FSDirectory is recommended to surface
+  // any errors associated with finishing writes (in case of future features).
+  // The directory is considered closed regardless of return status.
+  virtual IOStatus Close(const IOOptions& /*options*/,
+                         IODebugContext* /*dbg*/) {
+    return IOStatus::NotSupported("Close");
   }
 
   virtual size_t GetUniqueId(char* /*id*/, size_t /*max_size*/) const {
@@ -1302,8 +1436,7 @@ class FileSystemWrapper : public FileSystem {
   FileSystem* target() const { return target_.get(); }
 
   // The following text is boilerplate that forwards all methods to target()
-  IOStatus NewSequentialFile(const std::string& f,
-                             const FileOptions& file_opts,
+  IOStatus NewSequentialFile(const std::string& f, const FileOptions& file_opts,
                              std::unique_ptr<FSSequentialFile>* r,
                              IODebugContext* dbg) override {
     return target_->NewSequentialFile(f, file_opts, r, dbg);
@@ -1330,8 +1463,7 @@ class FileSystemWrapper : public FileSystem {
                              const FileOptions& file_opts,
                              std::unique_ptr<FSWritableFile>* r,
                              IODebugContext* dbg) override {
-    return target_->ReuseWritableFile(fname, old_fname, file_opts, r,
-                                      dbg);
+    return target_->ReuseWritableFile(fname, old_fname, file_opts, r, dbg);
   }
   IOStatus NewRandomRWFile(const std::string& fname,
                            const FileOptions& file_opts,
@@ -1448,7 +1580,7 @@ class FileSystemWrapper : public FileSystem {
   }
 
   FileOptions OptimizeForLogRead(
-                  const FileOptions& file_options) const override {
+      const FileOptions& file_options) const override {
     return target_->OptimizeForLogRead(file_options);
   }
   FileOptions OptimizeForManifestRead(
@@ -1456,7 +1588,7 @@ class FileSystemWrapper : public FileSystem {
     return target_->OptimizeForManifestRead(file_options);
   }
   FileOptions OptimizeForLogWrite(const FileOptions& file_options,
-                                 const DBOptions& db_options) const override {
+                                  const DBOptions& db_options) const override {
     return target_->OptimizeForLogWrite(file_options, db_options);
   }
   FileOptions OptimizeForManifestWrite(
@@ -1490,14 +1622,24 @@ class FileSystemWrapper : public FileSystem {
 
   const Customizable* Inner() const override { return target_.get(); }
   Status PrepareOptions(const ConfigOptions& options) override;
-#ifndef ROCKSDB_LITE
   std::string SerializeOptions(const ConfigOptions& config_options,
                                const std::string& header) const override;
-#endif  // ROCKSDB_LITE
 
-  virtual IOStatus Poll(std::vector<void*>& io_handles,
-                        size_t min_completions) override {
+  IOStatus Poll(std::vector<void*>& io_handles,
+                size_t min_completions) override {
     return target_->Poll(io_handles, min_completions);
+  }
+
+  IOStatus AbortIO(std::vector<void*>& io_handles) override {
+    return target_->AbortIO(io_handles);
+  }
+
+  void DiscardCacheForDirectory(const std::string& path) override {
+    target_->DiscardCacheForDirectory(path);
+  }
+
+  void SupportedOps(int64_t& supported_ops) override {
+    return target_->SupportedOps(supported_ops);
   }
 
  protected:
@@ -1571,7 +1713,7 @@ class FSRandomAccessFileWrapper : public FSRandomAccessFile {
   }
   size_t GetUniqueId(char* id, size_t max_size) const override {
     return target_->GetUniqueId(id, max_size);
-  };
+  }
   void Hint(AccessPattern pattern) override { target_->Hint(pattern); }
   bool use_direct_io() const override { return target_->use_direct_io(); }
   size_t GetRequiredBufferAlignment() const override {
@@ -1581,7 +1723,7 @@ class FSRandomAccessFileWrapper : public FSRandomAccessFile {
     return target_->InvalidateCache(offset, length);
   }
   IOStatus ReadAsync(FSReadRequest& req, const IOOptions& opts,
-                     std::function<void(const FSReadRequest&, void*)> cb,
+                     std::function<void(FSReadRequest&, void*)> cb,
                      void* cb_arg, void** io_handle, IOHandleDeleter* del_fn,
                      IODebugContext* dbg) override {
     return target()->ReadAsync(req, opts, cb, cb_arg, io_handle, del_fn, dbg);
@@ -1794,6 +1936,10 @@ class FSDirectoryWrapper : public FSDirectory {
     return target_->FsyncWithDirOptions(options, dbg, dir_fsync_options);
   }
 
+  IOStatus Close(const IOOptions& options, IODebugContext* dbg) override {
+    return target_->Close(options, dbg);
+  }
+
   size_t GetUniqueId(char* id, size_t max_size) const override {
     return target_->GetUniqueId(id, max_size);
   }
@@ -1804,12 +1950,12 @@ class FSDirectoryWrapper : public FSDirectory {
 };
 
 // A utility routine: write "data" to the named file.
-extern IOStatus WriteStringToFile(FileSystem* fs, const Slice& data,
-                                  const std::string& fname,
-                                  bool should_sync = false);
+IOStatus WriteStringToFile(FileSystem* fs, const Slice& data,
+                           const std::string& fname, bool should_sync = false,
+                           const IOOptions& io_options = IOOptions());
 
 // A utility routine: read contents of named file into *data
-extern IOStatus ReadFileToString(FileSystem* fs, const std::string& fname,
-                                 std::string* data);
+IOStatus ReadFileToString(FileSystem* fs, const std::string& fname,
+                          std::string* data);
 
 }  // namespace ROCKSDB_NAMESPACE

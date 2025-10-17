@@ -47,15 +47,17 @@
 
 /* BEGIN RocksDB customizations */
 #ifndef XXPH_STATIC_LINKING_ONLY
-#define XXPH_STATIC_LINKING_ONLY 1 /* access experimental APIs like XXPH3 */
+// Access experimental APIs
+#define XXPH_STATIC_LINKING_ONLY 1
 #endif
 #define XXPH_NAMESPACE ROCKSDB_
 #define XXPH_INLINE_ALL
 #include <cstring>
 /* END RocksDB customizations */
 
+// clang-format off
 #if defined (__cplusplus)
-extern "C" {
+//extern "C" {
 #endif
 
 
@@ -383,10 +385,6 @@ typedef struct {
 #ifndef XXPH_STATIC_LINKING_ONLY
 #define XXPH_STATIC_LINKING_ONLY
 #endif
-
-/* BEGIN RocksDB customizations */
-#include "port/lang.h" /* for FALLTHROUGH_INTENDED, inserted as appropriate */
-/* END RocksDB customizations */
 
 /* *************************************
 *  Compiler Specific Options
@@ -1756,7 +1754,7 @@ XXPH3_64bits_withSeed(const void* input, size_t len, XXPH64_hash_t seed)
 #endif /* XXPH_STATIC_LINKING_ONLY */
 
 #if defined (__cplusplus)
-}
+//}
 #endif
 
 #endif /* XXPHASH_H_5627135585666179 */

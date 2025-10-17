@@ -4,7 +4,6 @@
 // (found in the LICENSE.Apache file in the root directory).
 
 #pragma once
-#ifndef ROCKSDB_LITE
 
 #include <memory>
 #include <string>
@@ -69,7 +68,7 @@ class PointLockTracker : public LockTracker {
 
   void Clear() override;
 
-  virtual LockTracker* GetTrackedLocksSinceSavePoint(
+  LockTracker* GetTrackedLocksSinceSavePoint(
       const LockTracker& save_point_tracker) const override;
 
   PointLockStatus GetPointLockStatus(ColumnFamilyId column_family_id,
@@ -99,4 +98,3 @@ class PointLockTrackerFactory : public LockTrackerFactory {
 };
 
 }  // namespace ROCKSDB_NAMESPACE
-#endif  // ROCKSDB_LITE
