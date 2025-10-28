@@ -7,6 +7,8 @@
 
 #if defined(HAVE_ARM64_CRC)
 
+#include <atomic>
+
 #if defined(__linux__)
 #include <asm/hwcap.h>
 #endif
