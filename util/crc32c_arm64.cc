@@ -7,6 +7,8 @@
 
 #if defined(HAVE_ARM64_CRC)
 
+#include <atomic>
+
 #if defined(__linux__)
 #include <asm/hwcap.h>
 #endif
@@ -49,7 +51,7 @@
   } while (0)
 #endif
 
-extern bool pmull_runtime_flag;
+extern std::atomic<bool> pmull_runtime_flag;
 
 uint32_t crc32c_runtime_check(void) {
 #if defined(ROCKSDB_AUXV_GETAUXVAL_PRESENT) || defined(__FreeBSD__)
