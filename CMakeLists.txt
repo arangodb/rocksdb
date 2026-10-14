@@ -123,7 +123,11 @@ else()
     if(WITH_JEMALLOC)
       find_package(JeMalloc REQUIRED)
       add_definitions(-DROCKSDB_JEMALLOC -DJEMALLOC_NO_DEMANGLE)
-      list(APPEND THIRDPARTY_LIBS JeMalloc::JeMalloc)
+      # intentional deviation from RocksDB CMake
+      # list(APPEND THIRDPARTY_LIBS JeMalloc::JeMalloc)
+      include_directories(${JEMALLOC_INCLUDE_DIR})
+      list(APPEND THIRDPARTY_LIBS ${JEMALLOC_LIBRARIES})
+      # intentional deviation end
     endif()
   endif()
 
